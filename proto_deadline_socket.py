@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-proto_deadline_socket.py — Standalone Prototype v2 for Athena Review (V36.0.3 Step B Hardened)
+proto_deadline_socket.py — Standalone Prototype v3 for Athena Review (V36.0.3 Step B Final)
 100% Python 3 Standard Library (`socket`, `ssl`, `selectors`, `io`, `http.client`, `urllib.parse`).
 Completely independent of `etgar_scout.py` (`main` untouched).
 
-Hardening added per Athena's review of Step B:
-  1. Zero SSLContext side-effect mutation: `DeadlinePinnedHTTPSConnection.__init__` NEVER mutates
-     a caller-provided `ssl.SSLContext`. Instead, it validates that `verify_mode == ssl.CERT_REQUIRED`
-     and `check_hostname is True` (raising `ValueError` otherwise), or creates a fresh secure default
-     context if `context is None`.
-  2. Strict FD cleanup on EVERY handshake failure path (cert verification error, TLS protocol error,
-     peer reset, or deadline expiry): guarantees `dsock.force_close()` / `ssl_sock.close()` / `raw_sock.close()`
-     with zero leaked file descriptors.
-  3. Standalone `fetch_https_with_deadline()` implementing real multi-hop redirect resolution under a
-     single Cumulative Network I/O Deadline (with explicit `DNS` exclusion documented).
+Contracts enforced:
+  1. Cumulative Network I/O Deadline checked BOTH BEFORE and AFTER every network I/O operation
+     (`connect_tcp_with_deadline`, `do_handshake`, `recv_into`, `send`, `conn.request`,
+     `conn.getresponse`, every `resp.read1` iteration including EOF, and before returning body),
+     so an operation finishing after deadline expiry is NEVER reported as success.
+  2. Explicit Exclusion: does NOT bound synchronous OS DNS resolution (`socket.getaddrinfo`),
+     which is checked immediately upon return before TCP connect.
+  3. Zero SSLContext side-effect mutation: validates caller context (`CERT_REQUIRED` & `check_hostname`).
+  4. Strict socket/SSLSocket FD cleanup on EVERY handshake failure path and full HTTPResponse lifecycle.
 """
 
 from __future__ import annotations
@@ -100,11 +99,13 @@ class DeadlineSocket:
             raise DeadlineExceededError("CUMULATIVE_NETWORK_IO_DEADLINE_EXCEEDED")
 
     def do_handshake(self) -> None:
-        """Non-blocking TLS handshake strictly bounded by the cumulative deadline."""
+        """Non-blocking TLS handshake strictly bounded by the cumulative deadline (checked before & after)."""
         while True:
             self._check_deadline()
             try:
                 self._sock.do_handshake()
+                # Post-I/O deadline check: handshake finishing after expiry must NOT report success
+                self._check_deadline()
                 return
             except ssl.SSLWantReadError:
                 self._wait_event(selectors.EVENT_READ)
@@ -121,8 +122,12 @@ class DeadlineSocket:
             try:
                 # Attempt non-blocking read FIRST so ssl_sock.pending() > 0 drains immediately
                 if isinstance(self._sock, ssl.SSLSocket):
-                    return self._sock.recv_into(buffer, nbytes)
-                return self._sock.recv_into(buffer, nbytes, flags)
+                    n = self._sock.recv_into(buffer, nbytes)
+                else:
+                    n = self._sock.recv_into(buffer, nbytes, flags)
+                # Post-I/O deadline check: read/EOF finishing after expiry must NOT report success
+                self._check_deadline()
+                return n
             except ssl.SSLWantReadError:
                 self._wait_event(selectors.EVENT_READ)
             except ssl.SSLWantWriteError:
@@ -140,8 +145,12 @@ class DeadlineSocket:
             self._check_deadline()
             try:
                 if isinstance(self._sock, ssl.SSLSocket):
-                    return self._sock.send(data)
-                return self._sock.send(data, flags)
+                    sent = self._sock.send(data)
+                else:
+                    sent = self._sock.send(data, flags)
+                # Post-I/O deadline check: send finishing after expiry must NOT report success
+                self._check_deadline()
+                return sent
             except ssl.SSLWantWriteError:
                 self._wait_event(selectors.EVENT_WRITE)
             except ssl.SSLWantReadError:
@@ -160,6 +169,7 @@ class DeadlineSocket:
             if sent == 0:
                 raise ConnectionResetError("Socket connection broken during sendall.")
             offset += sent
+        self._check_deadline()
 
     def pending(self) -> int:
         if isinstance(self._sock, ssl.SSLSocket):
@@ -216,7 +226,7 @@ def connect_tcp_with_deadline(
     deadline: float,
     clock_fn: Callable[[], float] = time.monotonic,
 ) -> socket.socket:
-    """Non-blocking TCP connect bounded by the Cumulative Network I/O Deadline."""
+    """Non-blocking TCP connect bounded by the Cumulative Network I/O Deadline (checked before & after)."""
     rem = deadline - clock_fn()
     if rem <= 0.0:
         raise DeadlineExceededError("CUMULATIVE_NETWORK_IO_DEADLINE_EXCEEDED")
@@ -243,6 +253,9 @@ def connect_tcp_with_deadline(
             so_err = raw_sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
             if so_err != 0:
                 raise OSError(so_err, f"TCP connect failed with SO_ERROR={so_err}")
+        # Post-connect deadline check (covers immediate connect_ex==0 finishing after expiry)
+        if (deadline - clock_fn()) <= 0.0:
+            raise DeadlineExceededError("CUMULATIVE_NETWORK_IO_DEADLINE_EXCEEDED")
         return raw_sock
     except Exception:
         raw_sock.close()
@@ -268,7 +281,6 @@ class DeadlinePinnedHTTPSConnection(http.client.HTTPSConnection):
         if context is None:
             ctx = ssl.create_default_context()
         else:
-            # Do NOT mutate caller's SSLContext — validate it strictly instead!
             if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:
                 raise ValueError(
                     "DeadlinePinnedHTTPSConnection requires an SSLContext with "
@@ -301,8 +313,6 @@ class DeadlinePinnedHTTPSConnection(http.client.HTTPSConnection):
             dsock.do_handshake()
             self.sock = dsock
         except Exception:
-            # Close the outermost wrapper first (which closes underlying ssl_sock/raw_sock),
-            # ensuring ZERO leaked file descriptors across cert, protocol, or deadline errors.
             if dsock is not None:
                 dsock.force_close()
             elif ssl_sock is not None:
@@ -329,8 +339,8 @@ def fetch_https_with_deadline(
 ) -> Tuple[str, int, bytes]:
     """
     Standalone prototype fetch routine demonstrating real multi-hop redirect handling,
-    response-body reading via `read1(16384)`, and strict FD cleanup under a single
-    Cumulative Network I/O Deadline.
+    response-body reading via `read1(16384)`, strict FD cleanup, and post-I/O deadline checks
+    (including after end-of-body EOF) under a single Cumulative Network I/O Deadline.
     """
     if timeout_sec <= 0:
         raise DeadlineExceededError("CUMULATIVE_NETWORK_IO_DEADLINE_EXCEEDED")
@@ -338,13 +348,16 @@ def fetch_https_with_deadline(
     current_url = url
     visited = set()
 
+    def _assert_within_deadline() -> None:
+        if deadline - clock_fn() <= 0.0:
+            raise DeadlineExceededError("CUMULATIVE_NETWORK_IO_DEADLINE_EXCEEDED")
+
     for hop in range(max_redirects + 1):
         if current_url in visited:
             raise RuntimeError(f"Redirect loop detected: {current_url}")
         visited.add(current_url)
 
-        if deadline - clock_fn() <= 0:
-            raise DeadlineExceededError("CUMULATIVE_NETWORK_IO_DEADLINE_EXCEEDED")
+        _assert_within_deadline()
 
         parsed = urllib.parse.urlsplit(current_url)
         host = parsed.hostname or ""
@@ -356,8 +369,7 @@ def fetch_https_with_deadline(
         # DNS resolution is explicitly outside the non-blocking socket deadline,
         # but checked immediately upon return before opening a TCP connection.
         pinned_ip = pinned_ip_resolver(host, port)
-        if deadline - clock_fn() <= 0:
-            raise DeadlineExceededError("CUMULATIVE_NETWORK_IO_DEADLINE_EXCEEDED")
+        _assert_within_deadline()
 
         headers = {
             "Host": host if port == 443 else f"{host}:{port}",
@@ -376,15 +388,18 @@ def fetch_https_with_deadline(
         resp: Optional[http.client.HTTPResponse] = None
         try:
             conn.request("GET", path, headers=headers)
+            _assert_within_deadline()
             resp = conn.getresponse()
+            _assert_within_deadline()
             status = resp.status
             resp_headers: Dict[str, str] = {k.lower(): v for k, v in resp.getheaders()}
             chunks: List[bytes] = []
             total = 0
             while True:
-                if deadline - clock_fn() <= 0:
-                    raise DeadlineExceededError("CUMULATIVE_NETWORK_IO_DEADLINE_EXCEEDED")
+                _assert_within_deadline()
                 chunk = resp.read1(16384)
+                # Post-I/O check on EVERY chunk AND on EOF (chunk == b"")!
+                _assert_within_deadline()
                 if not chunk:
                     break
                 total += len(chunk)
@@ -392,6 +407,8 @@ def fetch_https_with_deadline(
                     raise RuntimeError(f"Response exceeded max_bytes ({max_bytes})")
                 chunks.append(chunk)
             body = b"".join(chunks)
+            # Final post-body-completion deadline check before reporting success
+            _assert_within_deadline()
         finally:
             if resp is not None:
                 try:

@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-test_proto_deadline_socket.py — Hardened Standalone Tests for DeadlineSocket Prototype v2
-Closes ALL 4 Athena review items for Step B:
-  - Test 08: Zero FD leaks on ALL handshake failure paths (bad cert, TLS protocol error, stalled handshake)
-  - Test 09: Full http.client.HTTPResponse lifecycle (request -> headers -> body -> close) + zero FD leak
-  - Test 10: Caller SSLContext is NEVER mutated (insecure context rejected cleanly without mutation)
-  - Test 07: Multi-hop redirects exercised through real `fetch_https_with_deadline()` (not manual loop!)
+test_proto_deadline_socket.py — Hardened Standalone Tests for DeadlineSocket Prototype v3
+Includes deterministic post-I/O deadline checks (Athena's final reinforcement for Step B):
+  - Test 10: Post-I/O deadline expiry after successful `do_handshake()`, `recv_into()`, and `send()`
+  - Test 11: Post-I/O deadline expiry at end of response body reading (EOF) in `fetch_https_with_deadline()`
 """
 
 import os
@@ -29,12 +27,24 @@ def _open_fd_count() -> int:
 
 
 class _ScriptedWantSocket:
-    def __init__(self, real_sock: socket.socket, read_faults=None, write_faults=None, max_write_chunk: int = 4):
+    def __init__(
+        self,
+        real_sock: socket.socket,
+        read_faults=None,
+        write_faults=None,
+        max_write_chunk: int = 4,
+        on_read=None,
+        on_write=None,
+        on_handshake=None,
+    ):
         self._real = real_sock
         self._real.setblocking(False)
         self._read_faults = list(read_faults or [])
         self._write_faults = list(write_faults or [])
         self._max_write_chunk = max_write_chunk
+        self._on_read = on_read
+        self._on_write = on_write
+        self._on_handshake = on_handshake
         self.closed = False
 
     def setblocking(self, flag: bool):
@@ -43,12 +53,19 @@ class _ScriptedWantSocket:
     def fileno(self) -> int:
         return self._real.fileno()
 
+    def do_handshake(self):
+        if self._on_handshake:
+            self._on_handshake()
+
     def recv_into(self, buf, nbytes=None, flags=0):
         if self._read_faults:
             exc = self._read_faults.pop(0)
             if exc is not None:
                 raise exc
-        return self._real.recv_into(buf, nbytes if nbytes is not None else len(buf), flags)
+        n = self._real.recv_into(buf, nbytes if nbytes is not None else len(buf), flags)
+        if self._on_read:
+            self._on_read(n)
+        return n
 
     def send(self, data, flags=0):
         if self._write_faults:
@@ -56,7 +73,10 @@ class _ScriptedWantSocket:
             if exc is not None:
                 raise exc
         mv = memoryview(data)
-        return self._real.send(mv[: self._max_write_chunk], flags)
+        sent = self._real.send(mv[: self._max_write_chunk], flags)
+        if self._on_write:
+            self._on_write(sent)
+        return sent
 
     def close(self):
         self.closed = True
@@ -289,7 +309,6 @@ class TestDeadlineSocketHardened(unittest.TestCase):
         th.join(timeout=3.0)
 
     def test_06_live_tls_multi_hop_redirect_through_real_fetch_function(self):
-        """Athena Fix #2: exercises multi-hop redirects through real `fetch_https_with_deadline()` (no manual loop)."""
         if not self.openssl_bin:
             self.skipTest("openssl unavailable")
 
@@ -302,7 +321,6 @@ class TestDeadlineSocketHardened(unittest.TestCase):
                 else:
                     tls_c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nDONE")
 
-        # Case A: 2 hops * 0.35s = 0.70s > 0.55s cumulative deadline -> MUST fail!
         port1, th1 = self._start_tls_server(_redirect_handler, accept_count=2)
         ctx = ssl.create_default_context(cafile=str(self.crt_path))
         t0 = time.monotonic()
@@ -317,7 +335,6 @@ class TestDeadlineSocketHardened(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 1.15)
         th1.join(timeout=3.0)
 
-        # Case B: Same 2 hops with 2.0s cumulative deadline -> MUST succeed and return final URL & body!
         port2, th2 = self._start_tls_server(_redirect_handler, accept_count=2)
         final_u, status, body = pds.fetch_https_with_deadline(
             f"https://api.openalex.org:{port2}/hop1",
@@ -332,11 +349,9 @@ class TestDeadlineSocketHardened(unittest.TestCase):
         th2.join(timeout=3.0)
 
     def test_07_handshake_failures_cert_protocol_and_stalled_leave_zero_fd_leaks(self):
-        """Athena Fix #1: cert error, TLS protocol error, and stalled handshake ALL close sockets with 0 FD leaks."""
         if not self.openssl_bin:
             self.skipTest("openssl unavailable")
 
-        # 1. Wrong hostname certificate (SSLCertVerificationError)
         def _bad_cert_handler(raw_c, srv_ctx):
             try:
                 with srv_ctx.wrap_socket(raw_c, server_side=True):
@@ -344,18 +359,15 @@ class TestDeadlineSocketHardened(unittest.TestCase):
             except ssl.SSLError:
                 pass
 
-        # 2. Plaintext garbage instead of TLS ServerHello (ssl.SSLError protocol error)
         def _protocol_err_handler(raw_c, _srv_ctx):
             raw_c.recv(1024)
             raw_c.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\nNot TLS!")
 
-        # 3. Completely silent stalled handshake (DeadlineExceededError)
         def _silent_handler(raw_c, _srv_ctx):
             time.sleep(1.5)
 
         fd_before = _open_fd_count()
 
-        # Run all 3 failure modes sequentially
         p1, th1 = self._start_tls_server(_bad_cert_handler, key_path=self.bad_key, crt_path=self.bad_crt)
         ctx_bad = ssl.create_default_context(cafile=str(self.bad_crt))
         c1 = pds.DeadlinePinnedHTTPSConnection("api.openalex.org", "127.0.0.1", p1, time.monotonic() + 2.0, ctx_bad)
@@ -381,10 +393,9 @@ class TestDeadlineSocketHardened(unittest.TestCase):
 
         fd_after = _open_fd_count()
         if fd_before >= 0:
-            self.assertEqual(fd_after, fd_before, f"FD leak detected across handshake failures: before={fd_before}, after={fd_after}")
+            self.assertEqual(fd_after, fd_before, f"FD leak detected: before={fd_before}, after={fd_after}")
 
     def test_08_full_http_response_lifecycle_and_zero_fd_leak(self):
-        """Athena Fix #3: full http.client.HTTPResponse lifecycle (request -> headers -> body -> close) with FD verification."""
         if not self.openssl_bin:
             self.skipTest("openssl unavailable")
 
@@ -425,14 +436,13 @@ class TestDeadlineSocketHardened(unittest.TestCase):
         th.join(timeout=3.0)
 
         self.assertIsNotNone(ds_ref)
-        self.assertTrue(ds_ref._real_closed, "DeadlineSocket underlying OS socket was not closed after response+conn close!")
+        self.assertTrue(ds_ref._real_closed)
         self.assertEqual(ds_ref._io_refs, 0)
         fd_after = _open_fd_count()
         if fd_before >= 0:
-            self.assertEqual(fd_after, fd_before, f"FD leak after full HTTPResponse lifecycle: before={fd_before}, after={fd_after}")
+            self.assertEqual(fd_after, fd_before)
 
     def test_09_caller_ssl_context_is_never_mutated(self):
-        """Athena Fix #4: passing an insecure SSLContext raises ValueError and NEVER mutates the caller's object."""
         insecure_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         insecure_ctx.check_hostname = False
         insecure_ctx.verify_mode = ssl.CERT_NONE
@@ -440,9 +450,98 @@ class TestDeadlineSocketHardened(unittest.TestCase):
         with self.assertRaises(ValueError):
             pds.DeadlinePinnedHTTPSConnection("api.openalex.org", "127.0.0.1", 443, time.monotonic() + 2.0, insecure_ctx)
 
-        # Verify caller's context was NOT mutated as a side-effect!
         self.assertFalse(insecure_ctx.check_hostname)
         self.assertEqual(insecure_ctx.verify_mode, ssl.CERT_NONE)
+
+    def test_10_post_io_deadline_checked_after_successful_handshake_recv_and_send(self):
+        """Athena reinforcement: an I/O call that completes AFTER deadline expiry MUST NOT report success."""
+        # A. do_handshake succeeds, but clock crossed deadline during handshake
+        s1, s1_peer = socket.socketpair()
+        try:
+            clk = {"t": 100.0}
+            scripted = _ScriptedWantSocket(s1, on_handshake=lambda: clk.__setitem__("t", 105.0))
+            ds = pds.DeadlineSocket(scripted, deadline=102.0, clock_fn=lambda: clk["t"])
+            with self.assertRaises(pds.DeadlineExceededError):
+                ds.do_handshake()
+            self.assertTrue(scripted.closed)
+        finally:
+            s1_peer.close()
+
+        # B. recv_into succeeds with valid data, but clock crossed deadline during recv_into
+        s2, s2_peer = socket.socketpair()
+        try:
+            s2_peer.sendall(b"LATE_DATA")
+            clk2 = {"t": 100.0}
+            scripted2 = _ScriptedWantSocket(s2, on_read=lambda n: clk2.__setitem__("t", 105.0))
+            ds2 = pds.DeadlineSocket(scripted2, deadline=102.0, clock_fn=lambda: clk2["t"])
+            with self.assertRaises(pds.DeadlineExceededError):
+                ds2.recv(9)
+            self.assertTrue(scripted2.closed)
+        finally:
+            s2_peer.close()
+
+        # C. send succeeds, but clock crossed deadline during send
+        s3, s3_peer = socket.socketpair()
+        try:
+            clk3 = {"t": 100.0}
+            scripted3 = _ScriptedWantSocket(s3, on_write=lambda n: clk3.__setitem__("t", 105.0))
+            ds3 = pds.DeadlineSocket(scripted3, deadline=102.0, clock_fn=lambda: clk3["t"])
+            with self.assertRaises(pds.DeadlineExceededError):
+                ds3.send(b"OK")
+            self.assertTrue(scripted3.closed)
+        finally:
+            s3_peer.close()
+
+    def test_11_post_body_completion_eof_after_deadline_raises_never_returns_success(self):
+        """Athena reinforcement: completing response body read (EOF) past deadline MUST raise DeadlineExceededError."""
+        if not self.openssl_bin:
+            self.skipTest("openssl unavailable")
+
+        def _fast_body_handler(raw_c, srv_ctx):
+            with srv_ctx.wrap_socket(raw_c, server_side=True) as tls_c:
+                tls_c.recv(2048)
+                # Send complete headers + full body in a single write (so HTTPResponse buffers it in one read),
+                # then close connection cleanly.
+                tls_c.sendall(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Length: 10\r\n"
+                    b"Connection: close\r\n\r\n"
+                    b"0123456789"
+                )
+
+        # Deterministic clock: stays well within deadline until the very last EOF check after body read,
+        # simulating the case where the final chunk/EOF arrives right after the deadline expired!
+        fd_before = _open_fd_count()
+        port, th = self._start_tls_server(_fast_body_handler)
+        ctx = ssl.create_default_context(cafile=str(self.crt_path))
+
+        # Advance synthetic clock right when resp.read1 returns b"" (EOF)
+        base_clock = {"t": 1000.0}
+        orig_read1 = pds.http.client.HTTPResponse.read1
+
+        def _expiring_on_eof_read1(self_resp, n=-1):
+            data = orig_read1(self_resp, n)
+            if data == b"":
+                # Body reached EOF — advance clock PAST deadline (1002.0) right as EOF completes!
+                base_clock["t"] = 1005.0
+            return data
+        pds.http.client.HTTPResponse.read1 = _expiring_on_eof_read1
+        try:
+            with self.assertRaises(pds.DeadlineExceededError):
+                pds.fetch_https_with_deadline(
+                    f"https://api.openalex.org:{port}/eof-late",
+                    pinned_ip_resolver=lambda h, p: "127.0.0.1",
+                    timeout_sec=2.0,
+                    context=ctx,
+                    clock_fn=lambda: base_clock["t"],
+                )
+        finally:
+            pds.http.client.HTTPResponse.read1 = orig_read1
+            th.join(timeout=3.0)
+
+        fd_after = _open_fd_count()
+        if fd_before >= 0:
+            self.assertEqual(fd_after, fd_before, f"FD leak on post-EOF deadline expiry: before={fd_before}, after={fd_after}")
 
 
 if __name__ == "__main__":
