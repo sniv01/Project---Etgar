@@ -1,0 +1,158 @@
+{
+  "config_schema": "etgar_scout_config_v1",
+  "config_version": "36.0.2",
+  "auto_learn_from_clicks": false,
+  "output_dir": "etgar_out",
+  "overwrite_existing_daily": false,
+  "network_policy": {
+    "https_only": true,
+    "allowed_ports": [
+      443
+    ],
+    "allow_env_proxy": false,
+    "block_url_credentials": true,
+    "max_redirects": 3,
+    "max_response_bytes": 2097152,
+    "request_timeout_sec": 12,
+    "total_run_timeout_sec": 90,
+    "per_domain_delay_sec": 0.8,
+    "max_dns_records": 16,
+    "max_sources_per_run": 6,
+    "max_items_per_source": 12,
+    "max_total_candidates": 80,
+    "check_europepmc_status": true,
+    "max_retraction_lookups_per_run": 10,
+    "user_agent": "EtgarScout/36.0.2 (ScienceXRayLab; Offline-First Academic Collector)"
+  },
+  "allowlisted_domains": [
+    "api.openalex.org",
+    "export.arxiv.org",
+    "www.ebi.ac.uk",
+    "api.crossref.org",
+    "www.sciencedaily.com",
+    "www.hayadan.org.il",
+    "davidson.weizmann.ac.il",
+    "lbscience.org",
+    "www.zavit.org.il",
+    "www.quantamagazine.org",
+    "www.nature.com",
+    "www.sciencenews.org"
+  ],
+  "sources": [
+    {
+      "id": "openalex",
+      "name": "OpenAlex Works API",
+      "domain": "api.openalex.org",
+      "kind": "openalex_json",
+      "source_type": "peer_reviewed_or_preprint_metadata",
+      "base_url": "https://api.openalex.org/works",
+      "known_limitations": "Metadata and inverted abstracts only; paywalled full text is not included; may include preprints unless filtered."
+    },
+    {
+      "id": "europepmc",
+      "name": "Europe PMC REST API",
+      "domain": "www.ebi.ac.uk",
+      "kind": "europepmc_json",
+      "source_type": "biomedical_life_sciences_abstract",
+      "base_url": "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+      "status_update_url": "https://www.ebi.ac.uk/europepmc/webservices/rest/status-update-search",
+      "known_limitations": "Biomedical and life-sciences bias; abstracts only unless OA full-text XML is fetched separately."
+    },
+    {
+      "id": "hayadan_rss",
+      "name": "הידען (Hayadan RSS)",
+      "domain": "www.hayadan.org.il",
+      "kind": "rss_xml",
+      "source_type": "science_news",
+      "base_url": "https://www.hayadan.org.il/feed",
+      "known_limitations": "Secondary science journalism in Hebrew; does not provide authoritative retraction status verification."
+    },
+    {
+      "id": "sciencedaily_rss",
+      "name": "ScienceDaily Top Science RSS",
+      "domain": "www.sciencedaily.com",
+      "kind": "rss_xml",
+      "source_type": "press_release_aggregator",
+      "base_url": "https://www.sciencedaily.com/rss/top/science.xml",
+      "known_limitations": "University press-release aggregator; prone to press-release simplification and lacks authoritative retraction status."
+    }
+  ],
+  "tracks": {
+    "interest": {
+      "label_he": "מסלול עניין (פרופיל מוצהר)",
+      "max_items": 2,
+      "queries": [
+        {
+          "source_id": "openalex",
+          "query": "paleontology stratigraphy Middle Pleistocene hominin",
+          "topic": "paleontology_geology"
+        },
+        {
+          "source_id": "openalex",
+          "query": "evolutionary biology epigenetics loss of function",
+          "topic": "evolutionary_biology"
+        },
+        {
+          "source_id": "europepmc",
+          "query": "neural entrainment music cognition attention",
+          "topic": "cognitive_neuroscience"
+        },
+        {
+          "source_id": "hayadan_rss",
+          "query": "",
+          "topic": "hebrew_science_news"
+        }
+      ]
+    },
+    "counter": {
+      "label_he": "מסלול ביקורת נגדית (QUERY_BASED_COUNTER · semantic_status: NOT_ASSESSED)",
+      "max_items": 2,
+      "mandatory": true,
+      "counter_pairs": [
+        {
+          "primary_topic": "evolutionary_biology_epigenetics",
+          "source_id": "openalex",
+          "query": "transgenerational epigenetic inheritance systematic review",
+          "counter_query": "transgenerational epigenetic inheritance replication null effect alternative explanation",
+          "non_judgmental": true
+        },
+        {
+          "primary_topic": "paleoanthropology_dating",
+          "source_id": "openalex",
+          "query": "Middle Pleistocene hominin chronology",
+          "counter_query": "Middle Pleistocene hominin chronology re-evaluation effect size systematic review",
+          "non_judgmental": true
+        }
+      ]
+    },
+    "random": {
+      "label_he": "מסלול מדגם אקראי (מתוך מסגרת המקורות המורשים בלבד)",
+      "max_items": 2,
+      "mandatory": true,
+      "frame_disclaimer": "מדגם אקראי מתוך מסגרת המקורות המורשים בקובץ התצורה בלבד — אינו מדגם מייצג של כלל המדע העולמי.",
+      "seed_strategy": "daily_utc_date",
+      "source_ids": [
+        "openalex",
+        "europepmc",
+        "sciencedaily_rss",
+        "hayadan_rss"
+      ]
+    },
+    "discovery": {
+      "label_he": "מסלול גילוי (מחוץ לפרופיל העניין הקיים)",
+      "max_items": 2,
+      "queries": [
+        {
+          "source_id": "openalex",
+          "query": "deep ocean hydrothermal vent biogeochemistry",
+          "topic": "oceanography_discovery"
+        },
+        {
+          "source_id": "openalex",
+          "query": "plant stomatal conductance drought physiology",
+          "topic": "botany_discovery"
+        }
+      ]
+    }
+  }
+}

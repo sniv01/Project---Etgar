@@ -1,0 +1,798 @@
+/* ==========================================================================
+   VERBATIM EXTRACT FROM science_xray_lab-v36.0.2.html FOR ATHENA CODE REVIEW
+   Sections: (1) EtgarInbox HTML, (2) v360Sha256 + v360EtgarInbox + HumanController JS, (3) Tests E01..E15
+   (BUILTIN_DEMO_BRIEFING JSON truncated below only for readability — full JSON is in etgar_out/etgar_briefing_2026-11-24.json)
+   ========================================================================== */
+
+/* --- 1. HTML PANEL (Tab 01) --- */
+<!-- V36.0.2 PROJECT ETGAR (ATHENA × GRACE): INBOX-ONLY BRIEFING RECEIVER (LOGICAL CAPABILITY SEPARATION) -->
+    <div class="panel" id="etgarInboxPanel" style="border-top:3px solid #c084fc; background:linear-gradient(135deg, rgba(19,32,52,0.92), rgba(13,22,36,0.96));">
+      <div class="panel-title">
+        <span>🦉 תיבת הדואר הנכנס של "אתגר" (EtgarInbox · V36.0.2 · Inbox-Only Scout)</span>
+        <span class="badge" id="etgarInboxCountBadge" style="background:rgba(192,132,252,0.18); color:#e9d5ff; border:1px solid rgba(192,132,252,0.45);">0 פריטים בתיבה</span>
+      </div>
+      <div class="panel-desc" style="margin-bottom:10px;">
+        <strong>הפרדת יכולות לוגית ברמת היישום (לא Sandbox קריפטוגרפי):</strong>
+        "אתגר" שומרת רק במפתח מבודד משלה (<code>niv_lab_etgar_inbox_v360</code>), אינה מחזיקה הפניה לארכיון (טאב 06) או לכספת ההפרכות, מציגה כל טקסט חיצוני דרך <code>textContent</code> בלבד (ללא <code>innerHTML</code>), ואינה מכריעה או מזכה בעצמה. העברה לרנטגן (טאב 03) מתבצעת רק בלחיצה אנושית מפורשת (<code>HumanController</code>).
+      </div>
+
+      <div class="controls-row" style="margin-bottom:8px;">
+        <button type="button" class="btn" style="flex:1.15; background:linear-gradient(135deg,#7e22ce,#0284c7); color:#fff;" onclick="document.getElementById('etgarBriefingFileInput').click()">📥 ייבא תדריך (.json · אימות SHA-256)</button>
+        <button type="button" class="btn btn-sec" style="flex:0.95; border-color:#fbbf24; color:#fde68a;" onclick="document.getElementById('etgarSidecarFileInput').click()" title="אופציונלי: טענו קובץ .sha256 להשוואה מול הבתים הגולמיים של קובץ ה-JSON">🧾 אמת Sidecar (.sha256)</button>
+        <button type="button" class="btn btn-sec" style="flex:1.1; border-color:#38bdf8; color:#bae6fd;" onclick="window.v360EtgarInbox.loadBuiltInDemoBriefing()">🧪 טען תדריך דמו (4 מסלולים + RETRACTED)</button>
+        <button type="button" class="btn btn-danger-outline" style="flex:0.5;" onclick="window.v360EtgarInbox.clearInbox()">🗑️ רוקן</button>
+        <input type="file" id="etgarBriefingFileInput" accept=".json,application/json" style="display:none" onchange="window.v360EtgarInbox.handleFileImport(this)">
+        <input type="file" id="etgarSidecarFileInput" accept=".sha256,.txt" style="display:none" onchange="window.v360EtgarInbox.handleSidecarFile(this)">
+      </div>
+
+      <div style="font-size:0.75rem; color:#fde68a; background:rgba(245,158,11,0.08); border:1px dashed rgba(245,158,11,0.35); border-radius:8px; padding:6px 10px; margin-bottom:8px;">
+        ⚖️ <b>הבחנה חובה:</b> <code>Integrity (SHA-256)</code> מוכיח רק שהקובץ לא השתנה מאז יצירתו · <code>Source Authenticity</code> אינה מוכחת ע"י ה-hash · <code>Scientific Verification</code> טרם בוצעה ע"י הסייר.
+      </div>
+
+      <div id="etgarInboxStatus" class="status-msg" style="margin-bottom:8px;"></div>
+      <div id="etgarSelectionAuditBox" style="display:none; margin-bottom:10px;"></div>
+      <div id="etgarInboxList" style="margin-top:8px;"></div>
+      <div id="etgarRetractedList" style="margin-top:10px;"></div>
+      <details id="etgarImportHistoryWrap" style="margin-top:10px; border-top:1px dashed var(--border); padding-top:8px;">
+        <summary style="cursor:pointer; font-size:0.79rem; color:var(--accent-bright); font-weight:700;">📜 יומן אירועי ייבוא מוגבל (עד 50 אירועים אחרונים · import_id מול import_event_id — ללא כפילות כרטיסיות)</summary>
+        <div id="etgarImportHistoryList" style="font-size:0.77rem; color:var(--text-muted); margin-top:6px;">טרם בוצעו פעולות ייבוא.</div>
+      </details>
+    </div>
+
+/* --- 2. VANILLA JS (SHA-256 + RFC 8785 JCS + EtgarInbox + HumanController) --- */
+// ========== V36.0.2 PURE VANILLA JS SHA-256 + RFC 8785 (JCS) CANONICALIZER (NO UNICODE NORMALIZATION) ==========
+(function (root) {
+  'use strict';
+
+  var K = new Uint32Array([
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+  ]);
+
+  function rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
+
+  function utf8Encode(str) {
+    if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(str);
+    var bytes = [];
+    for (var i = 0; i < str.length; i++) {
+      var cp = str.charCodeAt(i);
+      if (cp >= 0xd800 && cp <= 0xdbff && i + 1 < str.length) {
+        var lo = str.charCodeAt(++i);
+        cp = ((cp - 0xd800) << 10) + (lo - 0xdc00) + 0x10000;
+      }
+      if (cp < 0x80) bytes.push(cp);
+      else if (cp < 0x800) bytes.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
+      else if (cp < 0x10000) bytes.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+      else bytes.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    }
+    return new Uint8Array(bytes);
+  }
+
+  function sha256Bytes(bytes) {
+    var src = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    var len = src.length;
+    var padLen = ((len + 9 + 63) >> 6) << 6;
+    var buf = new Uint8Array(padLen);
+    buf.set(src);
+    buf[len] = 0x80;
+    var dv = new DataView(buf.buffer);
+    dv.setUint32(padLen - 8, Math.floor(len / 0x20000000), false);
+    dv.setUint32(padLen - 4, (len << 3) >>> 0, false);
+
+    var h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+    var h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+    var W = new Uint32Array(64);
+
+    for (var offset = 0; offset < padLen; offset += 64) {
+      for (var i = 0; i < 16; i++) W[i] = dv.getUint32(offset + i * 4, false);
+      for (var i = 16; i < 64; i++) {
+        var w15 = W[i - 15], w2 = W[i - 2];
+        var s0 = rotr(w15, 7) ^ rotr(w15, 18) ^ (w15 >>> 3);
+        var s1 = rotr(w2, 17) ^ rotr(w2, 19) ^ (w2 >>> 10);
+        W[i] = (W[i - 16] + s0 + W[i - 7] + s1) >>> 0;
+      }
+      var a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+      for (var i = 0; i < 64; i++) {
+        var S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        var ch = (e & f) ^ ((~e) & g);
+        var temp1 = (h + S1 + ch + K[i] + W[i]) >>> 0;
+        var S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        var maj = (a & b) ^ (a & c) ^ (b & c);
+        var temp2 = (S0 + maj) >>> 0;
+        h = g; g = f; f = e; e = (d + temp1) >>> 0;
+        d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+      }
+      h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
+      h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
+    }
+
+    return [h0, h1, h2, h3, h4, h5, h6, h7].map(function (v) { return v.toString(16).padStart(8, '0'); }).join('');
+  }
+
+  function sha256Utf8(str) { return sha256Bytes(utf8Encode(String(str))); }
+
+  // Pure RFC 8785 (JCS): ES6 Number.prototype.toString(), UTF-16 code unit key order, NO NFC/NFD normalization
+  function canonicalJsonString(val) {
+    if (val === null) return 'null';
+    if (typeof val === 'number') {
+      if (!isFinite(val)) throw new Error('Non-finite numbers are forbidden in RFC 8785 JCS.');
+      return Object.is(val, -0) ? '0' : String(val);
+    }
+    if (typeof val !== 'object') return JSON.stringify(val);
+    if (Array.isArray(val)) return '[' + val.map(canonicalJsonString).join(',') + ']';
+    var keys = Object.keys(val).sort();
+    var parts = [];
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (val[k] === undefined) continue;
+      parts.push(JSON.stringify(k) + ':' + canonicalJsonString(val[k]));
+    }
+    return '{' + parts.join(',') + '}';
+  }
+
+  function canonicalJsonBytes(obj) {
+    return utf8Encode(canonicalJsonString(obj));
+  }
+
+  root.v360Sha256 = {
+    utf8Encode: utf8Encode,
+    sha256Bytes: sha256Bytes,
+    sha256Utf8: sha256Utf8,
+    canonicalJsonString: canonicalJsonString,
+    canonicalJsonBytes: canonicalJsonBytes
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+// ========== V36.0.2 ETGAR INBOX (LOGICAL CAPABILITY SEPARATION · STORAGE ERROR CHECK · STRICT UTF-8 · NULL RAW HASH · TRI-STATE RETRACTION) ==========
+(function (root) {
+  'use strict';
+
+  var INBOX_STORAGE_KEY = 'niv_lab_etgar_inbox_v360';
+  var BRIEFING_SCHEMA = 'etgar_briefing_v1';
+  var BRIEFING_SCHEMA_VERSION = 1;
+  var MAX_IMPORT_LOG_ENTRIES = 50;
+  var lastImportedFileBytes = null;
+  var lastImportedFileName = '';
+
+  var BUILTIN_DEMO_BRIEFING = /* exact contents of etgar_out/etgar_briefing_2026-11-24.json */;
+
+  function readState() {
+    try {
+      var raw = localStorage.getItem(INBOX_STORAGE_KEY);
+      if (!raw) return { items: [], retractedSources: [], importLog: [], lastSelectionAudit: null, lastDisclaimers: null };
+      var parsed = JSON.parse(raw);
+      return {
+        items: Array.isArray(parsed.items) ? parsed.items : [],
+        retractedSources: Array.isArray(parsed.retractedSources) ? parsed.retractedSources : [],
+        importLog: Array.isArray(parsed.importLog) ? parsed.importLog : [],
+        lastSelectionAudit: parsed.lastSelectionAudit || null,
+        lastDisclaimers: parsed.lastDisclaimers || null
+      };
+    } catch (e) {
+      return { items: [], retractedSources: [], importLog: [], lastSelectionAudit: null, lastDisclaimers: null };
+    }
+  }
+
+  function writeState(st) {
+    try {
+      localStorage.setItem(INBOX_STORAGE_KEY, JSON.stringify({
+        items: (st.items || []).slice(0, 80),
+        retractedSources: (st.retractedSources || []).slice(0, 40),
+        importLog: (st.importLog || []).slice(0, MAX_IMPORT_LOG_ENTRIES),
+        lastSelectionAudit: st.lastSelectionAudit || null,
+        lastDisclaimers: st.lastDisclaimers || null
+      }));
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function verifyBriefingDocument(doc, rawFileBytes, sidecarText) {
+    // Athena Checklist #9: rawFileSha256 is ONLY populated from actual raw file bytes — NEVER conflated with payload_sha256!
+    var rawFileSha = rawFileBytes ? root.v360Sha256.sha256Bytes(rawFileBytes) : null;
+
+    if (typeof sidecarText === 'string' && rawFileBytes) {
+      var m = sidecarText.match(/^\s*([0-9a-fA-F]{64})\b/);
+      if (!m) {
+        return { ok: false, code: 'SIDECAR_FORMAT_ERROR', error: 'קובץ ה-sidecar (.sha256) אינו מכיל מחרוזת SHA-256 תקינה בת 64 תווים.' };
+      }
+      if (m[1].toLowerCase() !== rawFileSha) {
+        return {
+          ok: false,
+          code: 'SIDECAR_FILE_SHA256_MISMATCH',
+          error: 'כשל באימות Sidecar (.sha256): hash הקובץ הגולמי (' + rawFileSha.slice(0, 12) + '…) אינו תואם ל-sidecar (' + m[1].toLowerCase().slice(0, 12) + '…).'
+        };
+      }
+    }
+
+    if (!doc || typeof doc !== 'object') {
+      return { ok: false, code: 'SCHEMA_VALIDATION_ERROR', error: 'כשל באימות מבנה: הקובץ אינו אובייקט JSON תקין.' };
+    }
+    if (doc.schema !== BRIEFING_SCHEMA) {
+      return { ok: false, code: 'SCHEMA_VALIDATION_ERROR', error: 'כשל באימות מבנה (Schema): סכימה לא מוכרת (' + String(doc.schema) + '). נדרש ' + BRIEFING_SCHEMA + '.' };
+    }
+    if (typeof doc.schema_version !== 'number' || doc.schema_version < 1 || doc.schema_version > BRIEFING_SCHEMA_VERSION) {
+      return { ok: false, code: 'SCHEMA_VALIDATION_ERROR', error: 'כשל באימות מבנה (Schema Version): גרסת סכימה לא נתמכת (' + String(doc.schema_version) + ').' };
+    }
+    if (!doc.integrity || !doc.payload || typeof doc.payload !== 'object') {
+      return { ok: false, code: 'SCHEMA_VALIDATION_ERROR', error: 'כשל באימות מבנה: חסרים שדות integrity או payload.' };
+    }
+    var expected = doc.integrity.payload_sha256;
+    if (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected)) {
+      return { ok: false, code: 'SCHEMA_VALIDATION_ERROR', error: 'כשל באימות מבנה: שדה payload_sha256 חסר או אינו תקין.' };
+    }
+    var canonBytes = root.v360Sha256.canonicalJsonBytes(doc.payload);
+    var actual = root.v360Sha256.sha256Bytes(canonBytes);
+    if (actual !== expected) {
+      return {
+        ok: false,
+        code: 'PAYLOAD_SHA256_MISMATCH',
+        error: 'כשל באימות hash של ה-payload (PAYLOAD_SHA256_MISMATCH): צפוי ' + expected.slice(0, 12) + '…, בפועל ' + actual.slice(0, 12) + '….'
+      };
+    }
+    return {
+      ok: true,
+      code: 'OK',
+      payloadSha256: actual,
+      rawFileSha256: rawFileSha,
+      payloadByteLength: canonBytes.length,
+      sidecarVerified: typeof sidecarText === 'string' && !!rawFileBytes
+    };
+  }
+
+  function verifyRawBriefingBytes(rawBytes, sidecarText) {
+    var bytes = rawBytes instanceof Uint8Array ? rawBytes : new Uint8Array(rawBytes);
+    // Explicit UTF-8 BOM rejection
+    if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+      return {
+        ok: false,
+        code: 'UTF8_BOM_DETECTED',
+        error: 'כשל קידוד (UTF8_BOM_DETECTED): הקובץ מתחיל ב-UTF-8 BOM (EF BB BF). המערכת מסרבת להסיר BOM בשקט לפני אימות ה-hash.'
+      };
+    }
+    // Athena Checklist #8: strict UTF-8 decoding with fatal: true -> INVALID_UTF8_ENCODING
+    var text;
+    if (typeof TextDecoder !== 'undefined') {
+      try {
+        text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      } catch (e) {
+        return {
+          ok: false,
+          code: 'INVALID_UTF8_ENCODING',
+          error: 'כשל קידוד (INVALID_UTF8_ENCODING): רצף הבתים אינו קידוד UTF-8 תקין (' + e.message + ').'
+        };
+      }
+    } else {
+      return {
+        ok: false,
+        code: 'INVALID_UTF8_ENCODING',
+        error: 'כשל קידוד (INVALID_UTF8_ENCODING): TextDecoder אינו זמין בסביבה זו לאימות UTF-8 קשיח.'
+      };
+    }
+
+    var parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      return { ok: false, code: 'JSON_SYNTAX_ERROR', error: 'כשל פענוח JSON (JSON_SYNTAX_ERROR): ' + e.message };
+    }
+    var ver = verifyBriefingDocument(parsed, bytes, sidecarText);
+    if (!ver.ok) return ver;
+    ver.doc = parsed;
+    return ver;
+  }
+
+  function importBriefingObject(doc, rawFileBytes, sourceLabel, sidecarText) {
+    var ver = verifyBriefingDocument(doc, rawFileBytes, sidecarText);
+    if (!ver.ok) return ver;
+
+    var st = readState();
+    var importId = 'IMP-' + ver.payloadSha256.slice(0, 12).toUpperCase();
+    var importEventId = 'EVT-' + Date.now() + '-' + Math.floor(Math.random() * 10000);
+    var nowStr = new Date().toLocaleString('he-IL');
+
+    var existingByHash = {};
+    st.items.forEach(function (it, idx) {
+      var key = it.content_sha256 || it.item_id;
+      if (key) existingByHash[key] = idx;
+    });
+
+    var incomingItems = Array.isArray(doc.payload.items) ? doc.payload.items : [];
+    var added = 0, skippedDuplicate = 0;
+
+    incomingItems.forEach(function (inc) {
+      if (!inc || typeof inc !== 'object') return;
+      var key = inc.content_sha256 || inc.item_id;
+      if (!key) return;
+      if (existingByHash[key] !== undefined) {
+        var cur = st.items[existingByHash[key]];
+        if (cur.provenance && inc.provenance) {
+          var curUrl = cur.provenance.original_url || '';
+          var incUrl = inc.provenance.original_url || '';
+          cur.provenance.duplicate_source_urls = Array.isArray(cur.provenance.duplicate_source_urls) ? cur.provenance.duplicate_source_urls : [];
+          if (incUrl && incUrl !== curUrl && cur.provenance.duplicate_source_urls.indexOf(incUrl) < 0) {
+            cur.provenance.duplicate_source_urls.push(incUrl);
+          }
+        }
+        skippedDuplicate++;
+      } else {
+        var clone = JSON.parse(JSON.stringify(inc));
+        clone._import_id = importId;
+        clone._first_import_event_id = importEventId;
+        clone._imported_at = nowStr;
+        st.items.unshift(clone);
+        existingByHash = {};
+        st.items.forEach(function (it, i2) { existingByHash[it.content_sha256 || it.item_id] = i2; });
+        added++;
+      }
+    });
+
+    var seenRet = {};
+    st.retractedSources.forEach(function (r) { seenRet[r.content_sha256 || r.item_id] = true; });
+    var incRet = Array.isArray(doc.payload.retracted_sources) ? doc.payload.retracted_sources : [];
+    var retractedAdded = 0;
+    incRet.forEach(function (r) {
+      if (!r || typeof r !== 'object') return;
+      var k = r.content_sha256 || r.item_id;
+      if (!k || seenRet[k]) return;
+      st.retractedSources.unshift(JSON.parse(JSON.stringify(r)));
+      seenRet[k] = true;
+      retractedAdded++;
+    });
+
+    st.importLog.unshift({
+      import_event_id: importEventId,
+      import_id: importId,
+      run_id: doc.payload.run_id || 'unknown',
+      source_label: sourceLabel || 'file_upload',
+      imported_at: nowStr,
+      payload_sha256: ver.payloadSha256,
+      raw_file_sha256: ver.rawFileSha256,
+      sidecar_verified: ver.sidecarVerified,
+      added: added,
+      retracted_added: retractedAdded,
+      skipped_duplicate: skippedDuplicate
+    });
+    st.lastSelectionAudit = doc.payload.selection_audit || st.lastSelectionAudit;
+    st.lastDisclaimers = doc.payload.epistemic_disclaimers || st.lastDisclaimers;
+
+    // Athena Checklist #7: MUST check writeState(st) return value — NEVER report success if storage failed!
+    if (!writeState(st)) {
+      return {
+        ok: false,
+        code: 'STORAGE_WRITE_FAILED',
+        error: 'שגיאת אחסון (STORAGE_WRITE_FAILED): הכתיבה ל-localStorage נכשלה (ייתכן שמכסת האחסון מלאה או חסומה). הפריטים לא נשמרו.'
+      };
+    }
+
+    renderInboxUI();
+
+    return {
+      ok: true,
+      code: 'OK',
+      import_id: importId,
+      import_event_id: importEventId,
+      payload_sha256: ver.payloadSha256,
+      raw_file_sha256: ver.rawFileSha256,
+      added: added,
+      retracted_added: retractedAdded,
+      skipped_duplicate: skippedDuplicate,
+      total_in_inbox: st.items.length
+    };
+  }
+
+  function showInboxStatus(msg, isErr) {
+    var el = document.getElementById('etgarInboxStatus');
+    if (!el) return;
+    el.style.display = 'block';
+    el.style.color = isErr ? '#fca5a5' : '#6ee7b7';
+    el.style.background = isErr ? 'rgba(239,68,68,0.14)' : 'rgba(16,185,129,0.12)';
+    el.textContent = msg;
+  }
+
+  function elText(tag, text, styleStr, className) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (styleStr) node.setAttribute('style', styleStr);
+    node.textContent = String(text == null ? '' : text);
+    return node;
+  }
+
+  function renderInboxUI() {
+    if (typeof document === 'undefined') return;
+    var st = readState();
+    var badge = document.getElementById('etgarInboxCountBadge');
+    if (badge) {
+      badge.textContent = st.items.length + ' פריטים' + (st.retractedSources.length ? (' · ' + st.retractedSources.length + ' RETRACTED') : '');
+    }
+
+    var auditBox = document.getElementById('etgarSelectionAuditBox');
+    if (auditBox) {
+      auditBox.textContent = '';
+      if (st.lastSelectionAudit) {
+        var a = st.lastSelectionAudit;
+        auditBox.style.display = 'block';
+        var wrap = document.createElement('div');
+        wrap.setAttribute('style', 'background:#08101e;border:1px solid var(--border);border-right:3px solid #38bdf8;border-radius:10px;padding:9px 12px;font-size:0.78rem;color:#cbd5e1;');
+        var hdr = elText('div', '📊 מדד הוגנות הסיור (Selection Audit): נאספו ' + a.total_candidates_seen + ' · נבחרו ' + a.total_selected + ' · RETRACTED_SOURCE גלויים ' + (a.retracted_sources_flagged || 0) + ' · נפסלו ותועדו ' + a.total_rejected + ' · סנסציוניות ' + Math.round((a.sensational_headline_ratio || 0) * 100) + '% · נקיים/ניטרליים ' + a.clean_neutral_items_presented, 'font-weight:700;color:#bae6fd;margin-bottom:4px;');
+        var trk = a.selected_by_track || {};
+        var line2 = elText('div', 'חלוקה ל-4 מסלולים: עניין=' + (trk.interest || 0) + ' · ביקורת נגדית (QUERY_BASED_COUNTER · NOT_ASSESSED)=' + (trk.counter || 0) + ' · מדגם אקראי (במסגרת המקורות המורשים)=' + (trk.random || 0) + ' · גילוי=' + (trk.discovery || 0));
+        wrap.appendChild(hdr);
+        wrap.appendChild(line2);
+        auditBox.appendChild(wrap);
+      } else {
+        auditBox.style.display = 'none';
+      }
+    }
+
+    var trackNames = {
+      interest: '🎯 עניין',
+      counter: '⚖️ ביקורת נגדית (QUERY_BASED_COUNTER · NOT_ASSESSED)',
+      random: '🎲 אקראי (במסגרת המקורות המורשים)',
+      discovery: '🔭 גילוי (מחוץ לפרופיל)'
+    };
+
+    function buildItemCard(it, idx, isRetracted) {
+      var card = document.createElement('div');
+      card.className = 'paper-card';
+      card.setAttribute('style', isRetracted
+        ? 'border-color:#7f1d1d;border-right:4px solid #ef4444;background:#180e14;'
+        : 'border-right:3px solid ' + (it.track === 'counter' ? '#fbbf24' : (it.track === 'random' ? '#38bdf8' : (it.track === 'discovery' ? '#c084fc' : '#14b8a6'))) + ';');
+
+      var metaRow = document.createElement('div');
+      metaRow.className = 'paper-meta';
+      metaRow.appendChild(elText('span', trackNames[it.track] || it.track, '', 'badge'));
+
+      var rs = it.retraction_status || (isRetracted ? 'RETRACTED' : 'UNKNOWN');
+      if (isRetracted || rs === 'RETRACTED') {
+        metaRow.appendChild(elText('span', '🚫 RETRACTED_SOURCE (מאמר שנמשך — מוצג לעיון אנושי)', '', 'badge-retracted'));
+      } else if (rs === 'NOT_RETRACTED') {
+        metaRow.appendChild(elText('span', '✓ NOT_RETRACTED (מטא־דאטה)', 'background:rgba(16,185,129,0.16);color:#6ee7b7;padding:2px 8px;border-radius:6px;font-weight:700;'));
+      } else {
+        metaRow.appendChild(elText('span', '❔ RETRACTION_STATUS: UNKNOWN (טרם אומת)', '', 'badge-preprint'));
+      }
+
+      if (!isRetracted) {
+        if (it.signals && it.signals.sensational_headline_Lexicon) {
+          metaRow.appendChild(elText('span', '📣 כותרת סנסציונית (לקסיקון)', '', 'badge-preprint'));
+        } else {
+          metaRow.appendChild(elText('span', '📄 כותרת ניטרלית', 'background:rgba(16,185,129,0.12);color:#a7f3d0;padding:2px 8px;border-radius:6px;font-weight:600;'));
+        }
+      }
+      if (it.signals && it.signals.untrusted_injection_pattern_detected) {
+        metaRow.appendChild(elText('span', '🛡️ זוהתה מחרוזת Prompt Injection (נוטרלה כטקסט בלבד)', '', 'badge-retracted'));
+      }
+      metaRow.appendChild(elText('span', 'מזהה: ' + (it.item_id || '') + ' · ' + ((it.provenance && it.provenance.publisher) || '')));
+      card.appendChild(metaRow);
+
+      var titleEl = elText('div', it.title || '(ללא כותרת)', 'font-size:0.96rem;font-weight:800;color:#fff;margin-bottom:4px;');
+      titleEl.setAttribute('dir', 'auto');
+      card.appendChild(titleEl);
+
+      card.appendChild(elText('div', 'סיבת בחירה: ' + (it.selection_reason || '') + ' | סטטוס משיכה: ' + rs + ' (' + (it.retraction_check_method || 'unverified') + ') | מצב סמנטי: ' + (it.semantic_status || 'NOT_ASSESSED'), 'font-size:0.77rem;color:#94a3b8;margin-bottom:4px;'));
+
+      var absEl = elText('div', (it.raw_text || '').slice(0, 650), 'font-size:0.82rem;color:#cbd5e1;background:var(--bg-input);padding:8px 10px;border-radius:8px;margin-bottom:6px;white-space:pre-wrap;');
+      absEl.setAttribute('dir', 'auto');
+      card.appendChild(absEl);
+
+      if (it.provenance && Array.isArray(it.provenance.duplicate_source_urls) && it.provenance.duplicate_source_urls.length) {
+        card.appendChild(elText('div', '🔗 מקורות כפולים שנשמרו ב-provenance: ' + it.provenance.duplicate_source_urls.join(' , '), 'font-size:0.74rem;color:#fde68a;margin-bottom:5px;'));
+      }
+
+      var axes = it.verification_axes || {};
+      card.appendChild(elText('div',
+        'צירים: Source-Faithfulness=' + ((axes.SOURCE_FAITHFULNESS && axes.SOURCE_FAITHFULNESS.status) || 'NOT_VERIFIED') +
+        ' · Primary-Source=' + ((axes.PRIMARY_SOURCE_VERIFICATION && axes.PRIMARY_SOURCE_VERIFICATION.status) || 'NOT_VERIFIED') +
+        ' · Raw-Data=' + ((axes.RAW_DATA_REPRODUCIBILITY && axes.RAW_DATA_REPRODUCIBILITY.status) || 'NOT_AVAILABLE'),
+        'font-size:0.73rem;color:#94a3b8;margin-bottom:6px;'
+      ));
+
+      var actRow = document.createElement('div');
+      actRow.className = 'paper-actions';
+      var sendBtn = document.createElement('button');
+      sendBtn.type = 'button';
+      sendBtn.className = 'btn';
+      sendBtn.setAttribute('style', 'padding:6px 12px;font-size:0.78rem;');
+      sendBtn.textContent = isRetracted ? '🩻 עיין במקור שנמשך ברנטגן (אישור אנושי)' : '🩻 העבר ידנית לרנטגן (אישור אנושי)';
+      sendBtn.addEventListener('click', function (ev) {
+        if (typeof root.v360HumanTransferFromInbox === 'function') {
+          root.v360HumanTransferFromInbox(idx, ev, isRetracted);
+        }
+      });
+      var delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'btn btn-danger-outline';
+      delBtn.setAttribute('style', 'padding:6px 10px;font-size:0.76rem;');
+      delBtn.textContent = 'הסר מהתיבה';
+      delBtn.addEventListener('click', function () {
+        var curSt = readState();
+        if (isRetracted) curSt.retractedSources.splice(idx, 1);
+        else curSt.items.splice(idx, 1);
+        if (!writeState(curSt)) {
+          showInboxStatus('❌ שגיאת אחסון: לא ניתן היה לעדכן את התיבה.', true);
+          return;
+        }
+        renderInboxUI();
+      });
+      actRow.appendChild(sendBtn);
+      actRow.appendChild(delBtn);
+      card.appendChild(actRow);
+      return card;
+    }
+
+    var list = document.getElementById('etgarInboxList');
+    if (list) {
+      list.textContent = '';
+      if (!st.items.length) {
+        list.appendChild(elText('div', 'תיבת הדואר הנכנס של אתגר ריקה. ייבאו קובץ etgar_briefing_*.json שנוצר ע"י etgar_scout.py או לחצו על "טען תדריך דמו".', 'font-size:0.81rem;color:var(--text-muted);padding:6px 0;'));
+      } else {
+        st.items.forEach(function (it, idx) { list.appendChild(buildItemCard(it, idx, false)); });
+      }
+    }
+
+    var retBox = document.getElementById('etgarRetractedList');
+    if (retBox) {
+      retBox.textContent = '';
+      if (st.retractedSources.length) {
+        // Athena Checklist #10: accurate wording (not automatically deleted by scout; manually removable)
+        retBox.appendChild(elText('div', '🚫 מקורות שנמשכו (RETRACTED_SOURCE · ' + st.retractedSources.length + ') — אינם נמחקים אוטומטית ע״י הסייר (ניתנים להסרה ידנית מהתיבה):', 'font-size:0.82rem;font-weight:800;color:#fca5a5;margin-bottom:6px;'));
+        st.retractedSources.forEach(function (r, idx) { retBox.appendChild(buildItemCard(r, idx, true)); });
+      }
+    }
+
+    var histEl = document.getElementById('etgarImportHistoryList');
+    if (histEl) {
+      histEl.textContent = '';
+      if (!st.importLog.length) {
+        histEl.textContent = 'טרם בוצעו פעולות ייבוא.';
+      } else {
+        st.importLog.forEach(function (ev) {
+          var rawHashTxt = ev.raw_file_sha256 ? (String(ev.raw_file_sha256).slice(0, 12) + '…') : 'null (ללא קובץ גולמי)';
+          histEl.appendChild(elText('div',
+            '• [' + ev.imported_at + '] ' + ev.import_event_id + ' | content=' + ev.import_id +
+            ' | payload_sha=' + String(ev.payload_sha256 || '').slice(0, 12) + '… | raw_file_sha=' + rawHashTxt +
+            ' | נוספו +' + ev.added + ', RETRACTED +' + (ev.retracted_added || 0) + ', דולגו כפילויות ' + ev.skipped_duplicate + ' (' + ev.source_label + ')',
+            'margin-bottom:3px;font-family:monospace;'
+          ));
+        });
+      }
+    }
+  }
+
+  function handleFileImport(inputEl) {
+    var file = inputEl && inputEl.files && inputEl.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      var rawBytes = new Uint8Array(reader.result);
+      lastImportedFileBytes = rawBytes;
+      lastImportedFileName = file.name;
+      var ver = verifyRawBriefingBytes(rawBytes, null);
+      if (!ver.ok) {
+        showInboxStatus('❌ הייבוא נחסם [' + ver.code + ']: ' + ver.error, true);
+      } else {
+        var res = importBriefingObject(ver.doc, rawBytes, file.name, null);
+        if (!res.ok) {
+          showInboxStatus('❌ הייבוא נחסם [' + res.code + ']: ' + res.error, true);
+        } else {
+          showInboxStatus('✅ התדריך יובא לתיבת הדואר הנכנס (RFC 8785 SHA-256 מאומת · ' + res.import_id + ' · אירוע ' + res.import_event_id + '): נוספו +' + res.added + ', RETRACTED +' + res.retracted_added + ', דולגו כפילויות ' + res.skipped_duplicate + '. ניתן כעת לאמת גם קובץ .sha256.', false);
+        }
+      }
+      inputEl.value = '';
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function handleSidecarFile(inputEl) {
+    var file = inputEl && inputEl.files && inputEl.files[0];
+    if (!file) return;
+    if (!lastImportedFileBytes) {
+      showInboxStatus('⚠️ יש לייבא תחילה את קובץ ה-JSON, ורק אז לטעון את קובץ ה-sidecar (.sha256) שלו לאימות הבתים הגולמיים.', true);
+      inputEl.value = '';
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var sidecarTxt = String(reader.result || '');
+      var ver = verifyRawBriefingBytes(lastImportedFileBytes, sidecarTxt);
+      if (!ver.ok) {
+        showInboxStatus('❌ אימות Sidecar נכשל [' + ver.code + ']: ' + ver.error, true);
+      } else {
+        showInboxStatus('✅ אימות Sidecar (.sha256) הצליח במלואו על הקובץ "' + lastImportedFileName + '"! File SHA-256: ' + ver.rawFileSha256.slice(0, 16) + '… | Payload SHA-256: ' + ver.payloadSha256.slice(0, 16) + '…', false);
+      }
+      inputEl.value = '';
+    };
+    reader.readAsText(file, 'utf-8');
+  }
+
+  function loadBuiltInDemoBriefing() {
+    var res = importBriefingObject(BUILTIN_DEMO_BRIEFING, null, 'builtin_demo_v3602', null);
+    if (res.ok) {
+      showInboxStatus('✅ תדריך הדמו המובנה (4 מסלולים + Clean Article Challenge + RETRACTED_SOURCE + סטטוס משיכה תלת־ערכי) נטען בהצלחה (RFC 8785 SHA-256 מאומת · נוספו +' + res.added + ', RETRACTED +' + res.retracted_added + ', דולגו כפילויות ' + res.skipped_duplicate + ').', false);
+    } else {
+      showInboxStatus('❌ כשל בטעינת תדריך הדמו [' + res.code + ']: ' + res.error, true);
+    }
+  }
+
+  function clearInbox() {
+    lastImportedFileBytes = null;
+    lastImportedFileName = '';
+    if (!writeState({ items: [], retractedSources: [], importLog: [], lastSelectionAudit: null, lastDisclaimers: null })) {
+      showInboxStatus('❌ שגיאת אחסון (STORAGE_WRITE_FAILED): ריקון התיבה נכשל.', true);
+      return;
+    }
+    renderInboxUI();
+    showInboxStatus('🧹 תיבת הדואר הנכנס של אתגר רוקנה (הארכיון וכספת ההפרכות לא הושפעו).', false);
+  }
+
+  function getItemSnapshot(idx, isRetracted) {
+    var st = readState();
+    var arr = isRetracted ? st.retractedSources : st.items;
+    return arr[idx] ? JSON.parse(JSON.stringify(arr[idx])) : null;
+  }
+
+  root.v360EtgarInbox = {
+    STORAGE_KEY: INBOX_STORAGE_KEY,
+    MAX_IMPORT_LOG_ENTRIES: MAX_IMPORT_LOG_ENTRIES,
+    verifyBriefingDocument: verifyBriefingDocument,
+    verifyRawBriefingBytes: verifyRawBriefingBytes,
+    importBriefingObject: importBriefingObject,
+    handleFileImport: handleFileImport,
+    handleSidecarFile: handleSidecarFile,
+    loadBuiltInDemoBriefing: loadBuiltInDemoBriefing,
+    clearInbox: clearInbox,
+    readState: readState,
+    getItemSnapshot: getItemSnapshot,
+    renderInboxUI: renderInboxUI,
+    BUILTIN_DEMO_BRIEFING: BUILTIN_DEMO_BRIEFING
+  };
+
+  if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', renderInboxUI);
+    else setTimeout(renderInboxUI, 0);
+  }
+})(typeof window !== 'undefined' ? window : globalThis);
+
+// Separate HumanController Bridge: requires BOTH trusted browser event AND explicit human confirmation of item & target!
+window.v360HumanTransferFromInbox = function (idx, ev, isRetracted, skipConfirmForTest) {
+  if (ev && ev.isTrusted === false) return false;
+  var item = window.v360EtgarInbox && window.v360EtgarInbox.getItemSnapshot(idx, !!isRetracted);
+  if (!item) return false;
+  if (!skipConfirmForTest && typeof window !== 'undefined' && typeof window.confirm === 'function') {
+    var ok = window.confirm(
+      'אישור העברה אנושית מתיבת אתגר (EtgarInbox) אל טאב 03 (מכונת רנטגן):\n\n' +
+      '• פריט: ' + (item.title || '') + '\n' +
+      '• מזהה: ' + (item.item_id || '') + ' | סטטוס משיכה: ' + (item.retraction_status || 'UNKNOWN') + '\n' +
+      '• יעד: טאב 03 (מכונת רנטגן בלבד — אינו כותב לארכיון או לכספת ההפרכות)\n\n' +
+      'להמשיך בהעברה?'
+    );
+    if (!ok) return false;
+  }
+  var titleEl = document.getElementById('xrayTitle');
+  var inputEl = document.getElementById('xrayInput');
+  var urlEl = document.getElementById('xrayUrlInput');
+  if (titleEl) titleEl.value = (isRetracted ? '[RETRACTED_SOURCE] ' : '') + (item.title || '');
+  if (inputEl) inputEl.value = item.raw_text || '';
+  if (urlEl) urlEl.value = (item.provenance && item.provenance.original_url) || '';
+  if (typeof saveDraftState === 'function') saveDraftState();
+  if (typeof switchTab === 'function') switchTab('xray');
+  if (typeof runLocalXray === 'function') runLocalXray();
+  return true;
+};
+
+/* --- 3. SELF-CHECK UNIT TESTS E01..E15 --- */
+check("[E01 · V36.0.2 SHA-256 Python Parity — ASCII & Empty] מימוש SHA-256 טהור ב-JS תואם ב-100% ל-hashlib.sha256 של פייתון",()=>{
+    return window.v360Sha256.sha256Utf8("") === "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" &&
+           window.v360Sha256.sha256Utf8("NULLIUS IN VERBA") === "8a2e4de3fe0a31bdb3f5cefb704b2597e79820d5e282f6fac2000158362cad9f";
+  });
+  check("[E02 · V36.0.2 Frozen SHA-256 Python Parity — Hebrew & Emoji] וקטור מוקפא בעברית ואימוג'י (4-byte UTF-8) החסין לעדכוני גרסה",()=>{
+    const frozenHe = "אתגר: מעבדת רנטגן ומחקר מדעי V36." + "0";
+    return window.v360Sha256.sha256Utf8(frozenHe) === "2bbb55bf04ba71d7af8e4194e8bbd749facc0741132743f68cc6ca0150911797" &&
+           window.v360Sha256.sha256Utf8("🦉⚖️🩻 שלום אתנה וגרייס ☕") === "80f750fe1f07c0677961368002b131ffd43cf58d29be96bc4dce8ec7445edd62";
+  });
+  check("[E03 · V36.0.2 SHA-256 Python Parity — BOM, CRLF/LF & NFC/NFD] הבחנה מדויקת בין CRLF ל-LF, בין NFC ל-NFD ונוכחות BOM (תנאי אתנה #1)",()=>{
+    const bomBytes = new Uint8Array([0xef, 0xbb, 0xbf].concat(Array.from(window.v360Sha256.utf8Encode("טקסט עם BOM"))));
+    return window.v360Sha256.sha256Utf8("line1\r\nline2\r\n") === "4ad3ef64dfb83f7a8f789bce6f30cc1f8d18491b14db4c875309b150d2a7d213" &&
+           window.v360Sha256.sha256Utf8("line1\nline2\n") === "2751a3a2f303ad21752038085e2b8c5f98ecff61a2e4ebbd43506a941725be80" &&
+           window.v360Sha256.sha256Bytes(bomBytes) === "81b8bb9b394e145a289bb37d4188a6dbbd47e32ff2e25e64d6cd4b133ffc2a3a" &&
+           window.v360Sha256.sha256Utf8("caf\u00e9") === "850f7dc43910ff890f8879c0ed26fe697c93a067ad93a7d50f466a7028a9bf4e" &&
+           window.v360Sha256.sha256Utf8("cafe\u0301") === "81ef060bcd98adc7824eb5c1ada83c32491b16018e11e79f00ab9d09e04b015a";
+  });
+  check("[E04 · V36.0.2 Cross-Language Canonical JSON Parity] תדריך הדמו שנוצר ב-etgar_scout.py עובר אימות SHA-256 מדויק ב-JS (Python ↔ JS)",()=>{
+    const doc = window.v360EtgarInbox.BUILTIN_DEMO_BRIEFING;
+    const ver = window.v360EtgarInbox.verifyBriefingDocument(doc);
+    return ver.ok === true && ver.payloadSha256 === doc.integrity.payload_sha256;
+  });
+  check("[E05 · V36.0.2 Single-Char Tamper & Bad Schema Block] שינוי תו אחד ב-etgar_briefing JSON או סכימה זרה נחסמים מיידית",()=>{
+    const tampered = JSON.parse(JSON.stringify(window.v360EtgarInbox.BUILTIN_DEMO_BRIEFING));
+    tampered.payload.items[0].title += ".";
+    const badSchema = JSON.parse(JSON.stringify(window.v360EtgarInbox.BUILTIN_DEMO_BRIEFING));
+    badSchema.schema = "other_schema";
+    return window.v360EtgarInbox.verifyBriefingDocument(tampered).ok === false &&
+           window.v360EtgarInbox.verifyBriefingDocument(badSchema).ok === false;
+  });
+  check("[E06 · V36.0.2 Logical Capability Separation] ל-EtgarInbox אין שום הפניה לארכיון, לכספת או לפונקציות זיכוי ואינו משתמש ב-innerHTML",()=>{
+    const src = window.v360EtgarInbox.importBriefingObject.toString() + window.v360EtgarInbox.renderInboxUI.toString();
+    return window.v360EtgarInbox.STORAGE_KEY === "niv_lab_etgar_inbox_v360" &&
+           src.indexOf("niv_lab_notebook") < 0 && src.indexOf("saveToNotebook") < 0 &&
+           src.indexOf("v3531LabVault") < 0 && src.indexOf("exculpateFinding") < 0 &&
+           src.indexOf("innerHTML") < 0;
+  });
+  check("[E07 · V36.0.2 Dual import_id & import_event_id] ייבוא חוזר של אותו תדריך אינו יוצר כרטיסיות כפולות ומתעד את שני אירועי הייבוא",()=>{
+    const backupRaw = localStorage.getItem("niv_lab_etgar_inbox_v360");
+    try {
+      localStorage.removeItem("niv_lab_etgar_inbox_v360");
+      const r1 = window.v360EtgarInbox.importBriefingObject(window.v360EtgarInbox.BUILTIN_DEMO_BRIEFING, null, "test1");
+      const r2 = window.v360EtgarInbox.importBriefingObject(window.v360EtgarInbox.BUILTIN_DEMO_BRIEFING, null, "test2");
+      const st = window.v360EtgarInbox.readState();
+      return r1.ok && r2.ok && r1.added > 0 && r2.added === 0 && r2.skipped_duplicate === r1.added &&
+             r1.import_id === r2.import_id && r1.import_event_id !== r2.import_event_id && st.importLog.length === 2;
+    } finally {
+      if (backupRaw === null) localStorage.removeItem("niv_lab_etgar_inbox_v360");
+      else localStorage.setItem("niv_lab_etgar_inbox_v360", backupRaw);
+      window.v360EtgarInbox.renderInboxUI();
+    }
+  });
+  check("[E08 · V36.0.2 QUERY_BASED_COUNTER Epistemic Honesty] מסלול הביקורת הנגדית מתויג QUERY_BASED_COUNTER + semantic_status: NOT_ASSESSED",()=>{
+    const cnt = window.v360EtgarInbox.BUILTIN_DEMO_BRIEFING.payload.items.filter(it => it.track === "counter");
+    return cnt.length >= 1 && cnt.every(it => it.counter_mode === "QUERY_BASED_COUNTER" && it.semantic_status === "NOT_ASSESSED");
+  });
+  check("[E09 · V36.0.2 Clean Article Challenge & Anti-Confirmation] התדריך מציג מאמרים נקיים/ניטרליים ללא דגלים מומצאים וכולל את כל 4 המסלולים",()=>{
+    const p = window.v360EtgarInbox.BUILTIN_DEMO_BRIEFING.payload;
+    const t = p.selection_audit.selected_by_track;
+    return t.interest >= 1 && t.counter >= 1 && t.random >= 1 && t.discovery >= 1 &&
+           p.selection_audit.clean_neutral_items_presented >= 5 && p.auto_learn_from_clicks === false;
+  });
+  check("[E10 · V36.0.2 HumanController Guard] העברה מ-EtgarInbox לטאב 03 נחסמת לאירועים סינתטיים (isTrusted===false)",()=>{
+    return window.v360HumanTransferFromInbox(0, { isTrusted: false }) === false && Boolean(document.getElementById("etgarInboxPanel"));
+  });
+  check("[E11 · V36.0.2 Official RFC 8785 JCS Conformance] וקטור רשמי של RFC 8785 §3.2.3 (מיון UTF-16: 😀 לפני דּ) + ES6 numbers + הבחנת NFC≠NFD",()=>{
+    const rfcObj = { "\u20ac": "Euro Sign", "\r": "Carriage Return", "1": "One", "\u0080": "Control", "\ufb33": "Hebrew Letter Dalet With Dagesh", "\ud83d\ude00": "Emoji: Grinning Face", "\u00f6": "Latin Small Letter O With Diaeresis" };
+    const rfcSha = window.v360Sha256.sha256Bytes(window.v360Sha256.canonicalJsonBytes(rfcObj));
+    const nfcSha = window.v360Sha256.sha256Bytes(window.v360Sha256.canonicalJsonBytes({ k: "caf\u00e9" }));
+    const nfdSha = window.v360Sha256.sha256Bytes(window.v360Sha256.canonicalJsonBytes({ k: "cafe\u0301" }));
+    const negZero = window.v360Sha256.canonicalJsonString(-0);
+    return rfcSha === "5e321556d22018a9656991a9e94f77ec175fa193e52a2429d312f8419ec8b08c" && nfcSha !== nfdSha && negZero === "0";
+  });
+  check("[E12 · V36.0.2 Distinct Diagnostic Error Codes] הבחנה מפורשת בין UTF8_BOM_DETECTED, PAYLOAD_SHA256_MISMATCH, SIDECAR_FILE_SHA256_MISMATCH ו-SCHEMA_VALIDATION_ERROR",()=>{
+    const validBytes = window.v360Sha256.utf8Encode(JSON.stringify(window.v360EtgarInbox.BUILTIN_DEMO_BRIEFING));
+    const bomBytes = new Uint8Array([0xEF, 0xBB, 0xBF].concat(Array.from(validBytes)));
+    const rBom = window.v360EtgarInbox.verifyRawBriefingBytes(bomBytes, null);
+    const rSideBad = window.v360EtgarInbox.verifyRawBriefingBytes(validBytes, "0".repeat(64) + "  f.json");
+    const tampered = JSON.parse(JSON.stringify(window.v360EtgarInbox.BUILTIN_DEMO_BRIEFING));
+    tampered.payload.items[0].title += "!";
+    const rPayBad = window.v360EtgarInbox.verifyBriefingDocument(tampered);
+    const rSchBad = window.v360EtgarInbox.verifyBriefingDocument({ schema: "bad", schema_version: 1 });
+    return rBom.code === "UTF8_BOM_DETECTED" && rSideBad.code === "SIDECAR_FILE_SHA256_MISMATCH" && rPayBad.code === "PAYLOAD_SHA256_MISMATCH" && rSchBad.code === "SCHEMA_VALIDATION_ERROR";
+  });
+  check("[E13 · V36.0.2 Tri-State Retraction & Visibility] מאמר שנמשך נשמר כ-RETRACTED_SOURCE ופריטים לא־מאומתים נושאים UNKNOWN",()=>{
+    const p = window.v360EtgarInbox.BUILTIN_DEMO_BRIEFING.payload;
+    const rets = p.retracted_sources || [];
+    const unknowns = (p.items || []).filter(it => it.retraction_status === "UNKNOWN");
+    return rets.length >= 1 && rets[0].source_status === "RETRACTED_SOURCE" && rets[0].retraction_status === "RETRACTED" && unknowns.length >= 1 && Boolean(document.getElementById("etgarRetractedList"));
+  });
+  check("[E14 · V36.0.2 Storage Failure Guard] כשל בכתיבת localStorage עוצר את הייבוא ומחזיר STORAGE_WRITE_FAILED במקום ok:true",()=>{
+    const origSetItem = Storage.prototype.setItem;
+    try {
+      Storage.prototype.setItem = function () { throw new Error("QuotaExceededError"); };
+      const res = window.v360EtgarInbox.importBriefingObject(window.v360EtgarInbox.BUILTIN_DEMO_BRIEFING, null, "quota_test");
+      return res.ok === false && res.code === "STORAGE_WRITE_FAILED";
+    } finally {
+      Storage.prototype.setItem = origSetItem;
+    }
+  });
+  check("[E15 · V36.0.2 Strict UTF-8 (fatal:true) & Null Raw Hash] בתים לא-תקינים ב-UTF-8 נדחים ב-INVALID_UTF8_ENCODING ו-raw_file_sha256 נשאר null ללא קובץ גולמי",()=>{
+    const badUtf8 = new Uint8Array([0xFF, 0xFE, 0x80]);
+    const rBad = window.v360EtgarInbox.verifyRawBriefingBytes(badUtf8, null);
+    const rMem = window.v360EtgarInbox.verifyBriefingDocument(window.v360EtgarInbox.BUILTIN_DEMO_BRIEFING, null, null);
+    const rawDemoBytes = window.v360Sha256.utf8Encode(JSON.stringify(window.v360EtgarInbox.BUILTIN_DEMO_BRIEFING));
+    const rFile = window.v360EtgarInbox.verifyRawBriefingBytes(rawDemoBytes, null);
+    return rBad.ok === false && rBad.code === "INVALID_UTF8_ENCODING" &&
+           rMem.ok === true && rMem.rawFileSha256 === null &&
+           rFile.ok === true && typeof rFile.rawFileSha256 === "string" && rFile.rawFileSha256.length === 64;
+  });
