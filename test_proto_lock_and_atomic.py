@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-'''
-test_proto_lock_and_atomic.py — Synchronized Subprocess & Adversarial Tests (V36.0.3 Step C)
+"""
+test_proto_lock_and_atomic.py — Synchronized Subprocess & Adversarial Tests v2 (V36.0.3 Step C Final)
 
-Synchronization Design (Zero Random Timing Flakiness):
-  All multi-process race tests coordinate child processes through a local TCP barrier
-  server in the test process:
-    1. Each child starts, imports `proto_lock_and_atomic`, connects to the barrier port,
-       and blocks on `sock.recv(1)` ("READY").
-    2. Once ALL N children have checked in at the barrier, the parent broadcasts `b"G"`
-       simultaneously to every child ("GO!"), releasing them onto the kernel syscall in unison.
-'''
+Adds Athena's required tests for Step C:
+  - test_L06: Windows `_try_kernel_lock()` error discrimination (contention vs real OS errors)
+  - test_L07: `_write_metadata_locked()` partial-write loop (3 bytes/call) + 0-byte short-write guard
+  - test_W05: Exercises Windows `os.rename` fallback INSIDE `atomic_write_bytes()` itself for
+              BOTH `winerror=1` and `winerror=50` (success, race FileExistsError, and NO fallback
+              on `winerror=5` / generic OSError)
+  - test_W06: Real Windows NTFS test exercising `atomic_write_bytes()` fallback with `winerror=1` & `50`
+"""
 
 import errno
 import json
@@ -20,11 +20,18 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import proto_lock_and_atomic as pla
+
+
+def _make_win_oserror(winerror: int, err_no: int = 0, msg: str = "winerr") -> OSError:
+    exc = OSError(err_no, msg)
+    exc.winerror = winerror
+    return exc
 
 
 def _run_synchronized_subprocesses(worker_script: str, n_procs: int, extra_args_list):
@@ -130,9 +137,9 @@ class TestCrashSafeLockSubprocessAndFork(unittest.TestCase):
 
             acquired = [r for r in parsed if r["status"] == "ACQUIRED"]
             blocked = [r for r in parsed if r["status"] == "BLOCKED"]
-            self.assertEqual(len(acquired), 1, f"Expected exactly 1 ACQUIRED, got {parsed}")
-            self.assertEqual(len(blocked), 1, f"Expected exactly 1 BLOCKED, got {parsed}")
-            self.assertTrue(acquired[0]["recovered"], "Winner must record STALE_LOCK_RECOVERED")
+            self.assertEqual(len(acquired), 1)
+            self.assertEqual(len(blocked), 1)
+            self.assertTrue(acquired[0]["recovered"])
             self.assertTrue(lp.exists())
             self.assertEqual(lp.stat().st_ino, orig_ino)
             self.assertEqual(acquired[0]["ino"], orig_ino)
@@ -151,8 +158,8 @@ class TestCrashSafeLockSubprocessAndFork(unittest.TestCase):
             blocked = [r for r in parsed if r["status"] == "BLOCKED"]
             self.assertEqual(len(acquired), 1)
             self.assertEqual(len(blocked), 2)
-            self.assertFalse(acquired[0]["recovered"], "Clean first acquisition should not report stale recovery")
-            self.assertTrue(lp.exists(), "Lock file must persist after release()")
+            self.assertFalse(acquired[0]["recovered"])
+            self.assertTrue(lp.exists())
 
     def test_L03_real_sigkill_holder_recovered_with_same_inode(self):
         with tempfile.TemporaryDirectory() as td:
@@ -172,13 +179,11 @@ class TestCrashSafeLockSubprocessAndFork(unittest.TestCase):
                 cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
             try:
-                line = proc.stdout.readline().strip()
-                self.assertEqual(line, "LOCKED")
+                self.assertEqual(proc.stdout.readline().strip(), "LOCKED")
                 orig_ino = lp.stat().st_ino
 
-                probe = pla.CrashSafeLock(lp, "PROBE-WHILE-ALIVE")
                 with self.assertRaises(pla.LockConflictError):
-                    probe.acquire()
+                    pla.CrashSafeLock(lp, "PROBE-WHILE-ALIVE").acquire()
 
                 proc.kill()
                 proc.wait(timeout=5)
@@ -222,9 +227,8 @@ class TestCrashSafeLockSubprocessAndFork(unittest.TestCase):
             )
             try:
                 self.assertEqual(proc.stdout.readline().strip(), "CORRUPTED_AND_LOCKED")
-                contender = pla.CrashSafeLock(lp, "CONTENDER")
                 with self.assertRaises(pla.LockConflictError):
-                    contender.acquire()
+                    pla.CrashSafeLock(lp, "CONTENDER").acquire()
             finally:
                 proc.kill()
                 proc.wait(timeout=5)
@@ -238,7 +242,7 @@ class TestCrashSafeLockSubprocessAndFork(unittest.TestCase):
                 lk_tmp = pla.CrashSafeLock(lp, f"CYCLE-{i}")
                 lk_tmp.acquire()
                 lk_tmp.release()
-            self.assertEqual(pla._FORK_HOOK_REG_COUNT, 1, "register_at_fork must be registered ONCE only!")
+            self.assertEqual(pla._FORK_HOOK_REG_COUNT, 1)
 
             parent_lock = pla.CrashSafeLock(lp, "PARENT-A")
             parent_lock.acquire()
@@ -270,8 +274,6 @@ class TestCrashSafeLockSubprocessAndFork(unittest.TestCase):
                 self.assertEqual(res.stdout.strip(), "BLOCKED")
                 parent_lock.release()
 
-            # Hostage-FD test: parent acquires lock, forks sleeping grandchild, parent dies via os._exit(0).
-            # Test process MUST acquire immediately EVEN WHILE grandchild is still alive!
             lp_b = Path(td) / "fork_hostage.lock"
             hostage_script = (
                 "import os, sys, time\nfrom pathlib import Path\nimport proto_lock_and_atomic as pla\n"
@@ -303,6 +305,73 @@ class TestCrashSafeLockSubprocessAndFork(unittest.TestCase):
                 except OSError:
                     pass
 
+    def test_L06_windows_lock_error_discrimination_contention_vs_system_errors(self):
+        """Athena Fix #1: Windows _try_kernel_lock returns False ONLY for lock contention, and propagates real OS errors."""
+        with tempfile.TemporaryDirectory() as td:
+            lp = Path(td) / "win_err.lock"
+            lp.write_bytes(b" {}")
+            lk = pla.CrashSafeLock(lp, "WIN-ERR-TEST")
+
+            fake_msvcrt = types.SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0, locking=None)
+
+            contention_cases = [
+                PermissionError(errno.EACCES, "Permission denied"),
+                OSError(getattr(errno, "EDEADLOCK", 36), "Resource deadlock avoided"),
+                _make_win_oserror(33, errno.EACCES, "ERROR_LOCK_VIOLATION"),
+                _make_win_oserror(32, errno.EACCES, "ERROR_SHARING_VIOLATION"),
+            ]
+            for exc in contention_cases:
+                with self.subTest(contention=repr(exc)):
+                    fake_msvcrt.locking = mock.Mock(side_effect=exc)
+                    with mock.patch.object(pla, "msvcrt", fake_msvcrt), mock.patch.object(pla, "_is_windows", return_value=True):
+                        with self.assertRaises(pla.LockConflictError):
+                            lk.acquire()
+
+            system_error_cases = [
+                OSError(errno.EBADF, "Bad file descriptor"),
+                OSError(errno.EIO, "Input/output error"),
+                OSError(errno.ENOSPC, "No space left on device"),
+                OSError(errno.EINVAL, "Invalid argument"),
+                _make_win_oserror(5, errno.EACCES, "ERROR_ACCESS_DENIED (ACL, not lock contention)"),
+            ]
+            for exc in system_error_cases:
+                with self.subTest(system_error=repr(exc)):
+                    fake_msvcrt.locking = mock.Mock(side_effect=exc)
+                    with mock.patch.object(pla, "msvcrt", fake_msvcrt), mock.patch.object(pla, "_is_windows", return_value=True):
+                        with self.assertRaises(OSError) as ctx:
+                            lk.acquire()
+                        self.assertNotIsInstance(ctx.exception, pla.LockConflictError)
+
+    def test_L07_write_metadata_locked_uses_write_all_loop_for_partial_writes(self):
+        """Athena Fix #2: _write_metadata_locked handles partial os.write calls cleanly and rejects 0-byte writes."""
+        with tempfile.TemporaryDirectory() as td:
+            lp = Path(td) / "partial_meta.lock"
+            fd = os.open(str(lp), os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                real_write = os.write
+                write_calls = [0]
+
+                def partial_write(fdesc, buf):
+                    if fdesc == fd:
+                        write_calls[0] += 1
+                        return real_write(fdesc, bytes(buf)[:3])
+                    return real_write(fdesc, buf)
+
+                record = {"state": "ACTIVE", "pid": 12345, "run_id": "PARTIAL-WRITE-CHECK"}
+                with mock.patch("os.write", side_effect=partial_write):
+                    pla._write_metadata_locked(fd, record)
+
+                self.assertGreater(write_calls[0], 10, "Expected multiple partial os.write calls")
+                parsed, non_empty = pla._read_metadata_best_effort(fd)
+                self.assertTrue(non_empty)
+                self.assertEqual(parsed, record)
+
+                with mock.patch("os.write", return_value=0):
+                    with self.assertRaises(OSError):
+                        pla._write_metadata_locked(fd, record)
+            finally:
+                os.close(fd)
+
 
 class TestAtomicWriteAndOrphanCleanup(unittest.TestCase):
     def test_W01_four_synchronized_subprocesses_race_overwrite_false(self):
@@ -318,7 +387,7 @@ class TestAtomicWriteAndOrphanCleanup(unittest.TestCase):
 
             winners = [r for r in parsed if r["status"] == "WROTE"]
             losers = [r for r in parsed if r["status"] == "EXISTS"]
-            self.assertEqual(len(winners), 1, f"Expected exactly 1 winner, got {parsed}")
+            self.assertEqual(len(winners), 1)
             self.assertEqual(len(losers), 3)
 
             win_idx = winners[0]["idx"]
@@ -381,16 +450,101 @@ class TestAtomicWriteAndOrphanCleanup(unittest.TestCase):
             self.assertTrue(real_file.exists())
             self.assertTrue(lp.exists())
 
-    @unittest.skipUnless(os.name == "nt", "Windows-only os.rename non-overwrite verification")
-    def test_W05_windows_os_rename_refuses_overwrite_atomically(self):
-        with tempfile.TemporaryDirectory() as td:
-            target = Path(td) / "win_target.json"
-            target.write_bytes(b"ORIGINAL_WIN")
-            tmp = Path(td) / ".win_target.json.tmp.1.0123456789abcdef"
-            tmp.write_bytes(b"NEW_WIN")
-            with self.assertRaises(FileExistsError):
-                os.rename(str(tmp), str(target))
-            self.assertEqual(target.read_bytes(), b"ORIGINAL_WIN")
+    def test_W05_windows_fallback_inside_atomic_write_bytes_for_winerror_1_and_50(self):
+        """Athena Fix #3: exercises Windows fallback INSIDE atomic_write_bytes() itself for winerror 1 & 50."""
+        real_rename = os.rename
+
+        def win_semantics_rename(src: str, dst: str) -> None:
+            if os.path.exists(dst):
+                raise FileExistsError(errno.EEXIST, "File exists (Windows os.rename)", dst)
+            real_rename(src, dst)
+
+        for winerr_code in (1, 50):
+            with self.subTest(winerror=winerr_code):
+                with tempfile.TemporaryDirectory() as td:
+                    tdp = Path(td)
+                    target = tdp / f"win_fb_{winerr_code}.json"
+
+                    link_err = _make_win_oserror(winerr_code, errno.EINVAL, f"hardlink unsupported winerror={winerr_code}")
+                    with (
+                        mock.patch.object(pla, "_is_windows", return_value=True),
+                        mock.patch("os.link", side_effect=link_err) as m_link,
+                        mock.patch("os.rename", side_effect=win_semantics_rename) as m_rename,
+                    ):
+                        res = pla.atomic_write_bytes(target, f"WIN_DATA_{winerr_code}".encode("utf-8"), overwrite=False)
+                    self.assertEqual(res, target)
+                    self.assertEqual(target.read_bytes(), f"WIN_DATA_{winerr_code}".encode("utf-8"))
+                    m_link.assert_called_once()
+                    m_rename.assert_called_once()
+                    self.assertEqual([p.name for p in tdp.iterdir() if ".tmp." in p.name], [])
+
+                    orig_exists = Path.exists
+                    injected = {"done": False}
+
+                    def race_exists(self_path: Path) -> bool:
+                        if self_path == target and not injected["done"]:
+                            injected["done"] = True
+                            return False
+                        return orig_exists(self_path)
+
+                    with (
+                        mock.patch.object(pla, "_is_windows", return_value=True),
+                        mock.patch.object(Path, "exists", race_exists),
+                        mock.patch("os.link", side_effect=link_err),
+                        mock.patch("os.rename", side_effect=win_semantics_rename) as m_rename2,
+                    ):
+                        with self.assertRaises(FileExistsError):
+                            pla.atomic_write_bytes(target, b"MUST_NOT_OVERWRITE", overwrite=False)
+                    m_rename2.assert_called_once()
+                    self.assertEqual(target.read_bytes(), f"WIN_DATA_{winerr_code}".encode("utf-8"))
+                    self.assertEqual([p.name for p in tdp.iterdir() if ".tmp." in p.name], [])
+
+        for blocked_winerr in (5, 2, 183):
+            with self.subTest(blocked_winerror=blocked_winerr):
+                with tempfile.TemporaryDirectory() as td:
+                    tdp = Path(td)
+                    target = tdp / f"no_fb_{blocked_winerr}.json"
+                    err_obj = _make_win_oserror(blocked_winerr, errno.EACCES, f"winerror={blocked_winerr}")
+                    with (
+                        mock.patch.object(pla, "_is_windows", return_value=True),
+                        mock.patch("os.link", side_effect=err_obj),
+                        mock.patch("os.rename") as m_rename_blocked,
+                    ):
+                        with self.assertRaises(OSError) as ctx:
+                            pla.atomic_write_bytes(target, b"DATA", overwrite=False)
+                    self.assertEqual(getattr(ctx.exception, "winerror", None), blocked_winerr)
+                    m_rename_blocked.assert_not_called()
+                    self.assertFalse(target.exists())
+                    self.assertEqual(list(tdp.iterdir()), [])
+
+    @unittest.skipUnless(os.name == "nt", "Real Windows OS os.rename fallback verification")
+    def test_W06_real_windows_atomic_write_bytes_fallback_winerror_1_and_50(self):
+        """Runs on real Windows: exercises atomic_write_bytes() -> real os.rename() with winerror 1 & 50."""
+        for winerr_code in (1, 50):
+            with self.subTest(real_win_winerror=winerr_code):
+                with tempfile.TemporaryDirectory() as td:
+                    tdp = Path(td)
+                    target = tdp / f"real_win_{winerr_code}.json"
+                    link_err = _make_win_oserror(winerr_code, errno.EINVAL, f"simulated winerror={winerr_code}")
+
+                    with mock.patch("os.link", side_effect=link_err):
+                        pla.atomic_write_bytes(target, b"ORIGINAL_WIN", overwrite=False)
+                    self.assertEqual(target.read_bytes(), b"ORIGINAL_WIN")
+
+                    orig_exists = Path.exists
+                    injected = {"done": False}
+
+                    def race_exists(self_path: Path) -> bool:
+                        if self_path == target and not injected["done"]:
+                            injected["done"] = True
+                            return False
+                        return orig_exists(self_path)
+
+                    with mock.patch.object(Path, "exists", race_exists), mock.patch("os.link", side_effect=link_err):
+                        with self.assertRaises(FileExistsError):
+                            pla.atomic_write_bytes(target, b"OVERWRITE_ATTEMPT", overwrite=False)
+                    self.assertEqual(target.read_bytes(), b"ORIGINAL_WIN")
+                    self.assertEqual([p.name for p in tdp.iterdir() if ".tmp." in p.name], [])
 
 
 if __name__ == "__main__":

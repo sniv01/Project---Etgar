@@ -1,37 +1,17 @@
 #!/usr/bin/env python3
 """
-proto_lock_and_atomic.py — Standalone Prototype for Athena Review (V36.0.3 Step C)
+proto_lock_and_atomic.py — Standalone Prototype v2 for Athena Review (V36.0.3 Step C Final)
 100% Python 3 Standard Library. Completely independent of `etgar_scout.py` (`main` untouched).
 
-Implements:
-  1. `CrashSafeLock`:
-     - Persistent lock file that is NEVER unlinked (not in acquire, recovery, or release).
-     - POSIX: `fcntl.flock(fd, LOCK_EX | LOCK_NB)`.
-     - Single module-level `os.register_at_fork(after_in_child=...)` registered ONCE via
-       `weakref.WeakSet` (never per-acquire, never captures fixed FD numbers, resets state
-       before `os.close(fd)` without calling `LOCK_UN` or writing).
-     - `os.set_inheritable(fd, False)` on every opened FD.
-     - Windows: `msvcrt.locking(fd, LK_NBLCK, 1)` on dedicated sentinel byte 0 (`b" "`),
-       metadata from byte 1 treated strictly as best-effort diagnostic info (corrupt/partial
-       JSON never alters lock decision or suppresses `LockConflictError`).
-     - `STALE_LOCK_RECOVERED` detected ONLY after kernel lock acquisition when previous
-       metadata shows `"state": "ACTIVE"` or corrupt/truncated JSON from a crashed holder.
-  2. `atomic_write_bytes(target, data, overwrite=False, on_cleanup_warning=None)`:
-     - Unique temp file `.{target.name}.tmp.{pid}.{secrets.token_hex(8)}` opened with
-       `O_CREAT | O_EXCL | O_WRONLY`, fully written + `os.fsync(fd)` before publish.
-     - `overwrite=True`: `os.replace(tmp_path, target)`.
-     - `overwrite=False`: FAIL-CLOSED atomic publish via `os.link(tmp_path, target)`.
-       * Windows-only fallback (`os.rename`) ONLY when `os.name == "nt"` and
-         `getattr(exc, "winerror", None) in (1, 50)` (unsupported hard links on FAT32/exFAT).
-         NEVER falls back on `FileExistsError`, `PermissionError` (`winerror=5`), or generic `OSError`.
-       * POSIX hard-link unsupported errors raise `AtomicPublishUnsupportedError` (fail-closed;
-         never writes directly to `target`).
-     - Strict separation of publish success vs temp-cleanup failure: once `published == True`,
-       a failed `os.unlink(tmp_path)` emits a non-fatal warning via `on_cleanup_warning` and
-       does NOT fail the write operation.
-  3. `cleanup_orphan_temps(output_dir, lock)`:
-     - Refuses to run unless `lock` is actively held by the current process.
-     - Assumes all writers to `output_dir` coordinate via the same `CrashSafeLock`.
+Hardening added per Athena's review of Step C:
+  1. Windows `_try_kernel_lock()` distinguishes genuine lock contention errors
+     (`winerror in (32, 33)` or `errno in (EACCES, EDEADLOCK, EDEADLK, EAGAIN)` when `winerror is None`)
+     from real OS/system errors (`EBADF`, `EIO`, `ENOSPC`, `EINVAL`, `winerror=5` ACL denied, etc.),
+     propagating real OS errors upward instead of returning `False`.
+  2. `_write_metadata_locked()` uses a complete `_write_all(fd, data)` loop handling partial writes
+     (raising `OSError` on 0-byte short writes), shared with `atomic_write_bytes()`.
+  3. `atomic_write_bytes(..., overwrite=False)` Windows fallback (`os.rename`) is restricted strictly
+     to `os.name == "nt"` and `winerror in (1, 50)` (`ERROR_INVALID_FUNCTION`, `ERROR_NOT_SUPPORTED`).
 """
 
 from __future__ import annotations
@@ -49,12 +29,33 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 if os.name == "nt":
     import msvcrt
 else:
+    msvcrt = None  # type: ignore[assignment]
     import fcntl
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
 
 SCRIPT_VERSION = "36.0.3-proto"
 ORPHAN_TEMP_PATTERN = re.compile(r"^\..+\.tmp\.\d+\.[0-9a-f]{16}$")
 WINDOWS_HARDLINK_UNSUPPORTED_WINERRORS = (1, 50)  # ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED
-POSIX_HARDLINK_UNSUPPORTED_ERRNOS = (errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP))
+WINDOWS_LOCK_CONTENTION_WINERRORS = (32, 33)  # ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
+WINDOWS_LOCK_CONTENTION_ERRNOS = tuple(
+    e
+    for e in (
+        getattr(errno, "EACCES", 13),
+        getattr(errno, "EDEADLOCK", 36),
+        getattr(errno, "EDEADLK", 35),
+        getattr(errno, "EAGAIN", 11),
+    )
+    if e is not None
+)
+POSIX_HARDLINK_UNSUPPORTED_ERRNOS = (
+    errno.EOPNOTSUPP,
+    errno.EXDEV,
+    errno.EMLINK,
+    getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+)
 
 
 class LockConflictError(Exception):
@@ -75,7 +76,7 @@ class AtomicPublishUnsupportedError(OSError):
 
 _ACTIVE_LOCKS: "weakref.WeakSet[CrashSafeLock]" = weakref.WeakSet()
 _FORK_HOOK_REGISTERED: bool = False
-_FORK_HOOK_REG_COUNT: int = 0  # Exposed for regression test verification
+_FORK_HOOK_REG_COUNT: int = 0
 
 
 def _on_fork_child() -> None:
@@ -99,10 +100,41 @@ def _on_fork_child() -> None:
 
 def _ensure_fork_hook_registered() -> None:
     global _FORK_HOOK_REGISTERED, _FORK_HOOK_REG_COUNT
-    if os.name != "nt" and not _FORK_HOOK_REGISTERED and hasattr(os, "register_at_fork"):
+    if not _is_windows() and not _FORK_HOOK_REGISTERED and hasattr(os, "register_at_fork"):
         os.register_at_fork(after_in_child=_on_fork_child)
         _FORK_HOOK_REGISTERED = True
         _FORK_HOOK_REG_COUNT += 1
+
+
+# ==============================================================================
+# LOW-LEVEL WRITE-ALL & WINDOWS CONTENTION HELPERS
+# ==============================================================================
+
+def _write_all(fd: int, data: bytes) -> None:
+    """Writes all bytes to `fd`, looping over partial writes and raising on 0-byte short writes."""
+    mv = memoryview(data)
+    written = 0
+    total = len(mv)
+    while written < total:
+        n = os.write(fd, mv[written:])
+        if n <= 0:
+            raise OSError("Short write (0 bytes) while writing file descriptor.")
+        written += n
+
+
+def _is_windows_lock_contention(exc: OSError) -> bool:
+    """
+    Distinguishes Windows `msvcrt.locking(..., LK_NBLCK, 1)` lock contention from real OS errors.
+      - When `winerror` is present: ONLY `32` (SHARING_VIOLATION) and `33` (LOCK_VIOLATION)
+        indicate lock contention; e.g., `winerror=5` (ACCESS_DENIED) propagates as a real error.
+      - When `winerror` is None (standard MSVC CRT `_locking` via `PyErr_SetFromErrno`):
+        ONLY `EACCES` (13), `EDEADLOCK` (36), `EDEADLK`, or `EAGAIN` indicate contention;
+        `EBADF`, `EINVAL`, `EIO`, `ENOSPC`, etc. propagate upward.
+    """
+    winerr = getattr(exc, "winerror", None)
+    if winerr is not None:
+        return winerr in WINDOWS_LOCK_CONTENTION_WINERRORS
+    return exc.errno in WINDOWS_LOCK_CONTENTION_ERRNOS
 
 
 # ==============================================================================
@@ -141,25 +173,26 @@ def _read_metadata_best_effort(fd: int) -> Tuple[Optional[Dict[str, Any]], bool]
 
 def _write_metadata_locked(fd: int, record: Dict[str, Any]) -> None:
     """
-    Writes sentinel byte 0 (b' ') + UTF-8 JSON metadata starting at offset 1,
-    truncates trailing bytes, and fsyncs while kernel lock is held.
-    Note: On Windows, writing starts at offset 1 after ensuring byte 0 exists,
-    so locked byte 0 is untouched during metadata updates.
+    Writes sentinel byte 0 (b' ') + UTF-8 JSON metadata starting at offset 1 using a
+    full write-all loop (`_write_all`), truncates trailing bytes, and fsyncs while held.
     """
     body = json.dumps(record, ensure_ascii=False).encode("utf-8")
-    if os.name == "nt":
-        # Byte 0 is locked by this handle; ensure file has >= 1 byte, then write metadata from offset 1
-        os.lseek(fd, 1, os.SEEK_SET)
-        os.write(fd, body)
-        os.ftruncate(fd, 1 + len(body))
+    if _is_windows():
+        # Ensure sentinel byte 0 exists if file is empty (this handle holds byte-0 lock)
+        if os.fstat(fd).st_size == 0:
+            os.lseek(fd, 0, os.SEEK_SET)
+            _write_all(fd, b" " + body)
+            os.ftruncate(fd, 1 + len(body))
+        else:
+            os.lseek(fd, 1, os.SEEK_SET)
+            _write_all(fd, body)
+            os.ftruncate(fd, 1 + len(body))
     else:
         payload = b" " + body
         os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, payload)
+        _write_all(fd, payload)
         os.ftruncate(fd, len(payload))
     os.fsync(fd)
-
-
 
 
 class CrashSafeLock:
@@ -183,20 +216,17 @@ class CrashSafeLock:
         return self._acquired and self._fd is not None and self._owner_pid == os.getpid()
 
     def _try_kernel_lock(self, fd: int) -> bool:
-        if os.name == "nt":
-            # Ensure sentinel byte 0 exists before locking byte 0
-            try:
-                if os.fstat(fd).st_size == 0:
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    os.write(fd, b" ")
-            except OSError:
-                pass
+        if _is_windows():
+            # Windows byte-range locks work on byte 0 even on a 0-byte file;
+            # never perform an unprotected pre-lock write or swallow non-contention OS errors!
             os.lseek(fd, 0, os.SEEK_SET)
             try:
                 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
                 return True
-            except OSError:
-                return False
+            except OSError as exc:
+                if _is_windows_lock_contention(exc):
+                    return False
+                raise
         else:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -207,7 +237,7 @@ class CrashSafeLock:
                 raise
 
     def _kernel_unlock(self, fd: int) -> None:
-        if os.name == "nt":
+        if _is_windows():
             os.lseek(fd, 0, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
         else:
@@ -228,7 +258,6 @@ class CrashSafeLock:
         try:
             os.set_inheritable(fd, False)
             if not self._try_kernel_lock(fd):
-                # Best-effort diagnostic metadata read ONLY — corrupt/partial JSON NEVER affects LockConflictError!
                 holder, _non_empty = _read_metadata_best_effort(fd)
                 holder_desc = (
                     f"pid={holder.get('pid')}, run_id={holder.get('run_id')}"
@@ -237,7 +266,6 @@ class CrashSafeLock:
                 )
                 raise LockConflictError(f"Active Etgar Scout kernel lock held ({holder_desc}).")
 
-            # Kernel lock acquired atomically! Now inspect prior metadata for crash recovery audit.
             prior, was_non_empty = _read_metadata_best_effort(fd)
             self.recovered_event = None
             if was_non_empty:
@@ -277,7 +305,6 @@ class CrashSafeLock:
         if not self._acquired or self._fd is None:
             return
         if self._owner_pid != os.getpid():
-            # Defense-in-depth if ever called in a child process
             self._fd = None
             self._acquired = False
             self._owner_pid = None
@@ -324,7 +351,7 @@ class CrashSafeLock:
 # ==============================================================================
 
 def _fsync_dir_best_effort(directory: Path) -> None:
-    if os.name == "nt":
+    if _is_windows():
         return
     try:
         dir_fd = os.open(str(directory), os.O_RDONLY)
@@ -345,16 +372,16 @@ def atomic_write_bytes(
     """
     Atomically writes `data` to `target`.
       - Temp file created exclusively with `O_CREAT | O_EXCL` and random 16-hex token,
-        written completely and `os.fsync()`d before publish.
+        written via `_write_all` and `os.fsync()`d before publish.
       - `overwrite=True`: `os.replace(tmp_path, target)`.
       - `overwrite=False`: FAIL-CLOSED atomic non-overwriting publish via `os.link(tmp_path, target)`.
         * On Windows ONLY, falls back to `os.rename(tmp_path, target)` ONLY if `os.link` fails
-          with `winerror in (1, 50)` (unsupported hard links). Never falls back on `PermissionError`
-          or `FileExistsError`.
+          with `winerror in (1, 50)` (unsupported hard links). Never falls back on `PermissionError`,
+          `FileExistsError`, or generic `OSError`.
         * On POSIX, unsupported hard-link errors raise `AtomicPublishUnsupportedError` (fail-closed).
-      - Publish success is strictly separated from temp-cleanup failure: if `target` was published
-        and `os.unlink(tmp_path)` fails afterward, the write still succeeds and reports a non-fatal
-        warning via `on_cleanup_warning`.
+      - Publish success is strictly separated from temp-cleanup failure: once `published == True`,
+        a failed `os.unlink(tmp_path)` reports a non-fatal warning via `on_cleanup_warning` and
+        does NOT fail the write operation.
     """
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -383,16 +410,10 @@ def atomic_write_bytes(
         raise OSError("Failed to allocate unique temporary file name.")
 
     published = False
-    tmp_consumed = False  # True if os.replace or os.rename moved tmp_path itself to target
+    tmp_consumed = False
     try:
         try:
-            mv = memoryview(data)
-            written = 0
-            while written < len(mv):
-                n = os.write(fd, mv[written:])
-                if n <= 0:
-                    raise OSError("Short write (0 bytes) while writing temporary file.")
-                written += n
+            _write_all(fd, data)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -410,13 +431,13 @@ def atomic_write_bytes(
                 raise
             except OSError as exc:
                 winerr = getattr(exc, "winerror", None)
-                if os.name == "nt" and winerr in WINDOWS_HARDLINK_UNSUPPORTED_WINERRORS:
+                if _is_windows() and winerr in WINDOWS_HARDLINK_UNSUPPORTED_WINERRORS:
                     # Windows-only fallback for filesystems lacking hard links (e.g., FAT32/exFAT):
                     # On Windows, os.rename() fails atomically with FileExistsError if target exists.
                     os.rename(str(tmp_path), str(target))
                     published = True
                     tmp_consumed = True
-                elif os.name != "nt" and exc.errno in POSIX_HARDLINK_UNSUPPORTED_ERRNOS:
+                elif not _is_windows() and exc.errno in POSIX_HARDLINK_UNSUPPORTED_ERRNOS:
                     raise AtomicPublishUnsupportedError(
                         exc.errno,
                         f"Atomic non-overwriting publish unsupported on filesystem for {target} (fail-closed): {exc}",
@@ -433,12 +454,10 @@ def atomic_write_bytes(
                 pass
             except OSError as cleanup_exc:
                 if published:
-                    # Target is already durably published! Do NOT report publish failure!
                     msg = f"NON_FATAL_TEMP_CLEANUP_WARNING: published {target.name}, failed to unlink {tmp_path.name}: {cleanup_exc}"
                     if on_cleanup_warning is not None:
                         on_cleanup_warning(msg)
                 else:
-                    # Publish failed; ignore secondary cleanup error so original exception propagates
                     pass
 
     return target
